@@ -276,6 +276,14 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
     }
 
     # 9. Case analysis
+    if current_no >= 0.99:
+        # NO at $0.99+ — lock in profit regardless of trend
+        event["action"] = "sell_take_profit"
+        sim.add_monitoring_event(city_slug, date_str, event)
+        logger.info("[%s/%s] Case B: NO @ $%.3f >= $0.99, SELL TAKE PROFIT",
+                    city_slug, date_str, current_no)
+        return "sell"
+
     if not closing_in:
         # Case A: temp NOT trending toward threshold → HOLD
         event["action"] = "hold"
@@ -283,15 +291,6 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
         logger.info("[%s/%s] Case A: dist=%.1f not shrinking, HOLD (METAR=%.1f)",
                     city_slug, date_str, distance_to_threshold, metar_temp)
         return "hold"
-
-    # Temp IS trending toward threshold and we're near it
-    if current_no >= 0.99:
-        # Case B: NO at $0.99+ — lock in profit, only 1 cent left to gain
-        event["action"] = "sell_take_profit"
-        sim.add_monitoring_event(city_slug, date_str, event)
-        logger.info("[%s/%s] Case B: NO @ $%.3f >= $0.99, SELL TAKE PROFIT",
-                    city_slug, date_str, current_no)
-        return "sell"
 
     if not in_profit:
         if distance_to_threshold >= DISTANCE_MIN:
@@ -316,9 +315,17 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
                     city_slug, date_str, pnl_pct * 100)
         return "wait_for_stop"
 
-    # Closing in but NO not at $0.99 yet, and not in loss
+    # Winning, closing in, but NO < $0.99 — check proximity
+    if distance_to_threshold <= 1.0:
+        # Temp within 1°C of bucket — lock in profit
+        event["action"] = "sell_take_profit"
+        sim.add_monitoring_event(city_slug, date_str, event)
+        logger.info("[%s/%s] Case B2: closing in + dist=%.1f <= 1.0, SELL TAKE PROFIT (NO=$%.3f)",
+                    city_slug, date_str, distance_to_threshold, current_no)
+        return "sell"
+
     event["action"] = "hold"
     sim.add_monitoring_event(city_slug, date_str, event)
-    logger.info("[%s/%s] Monitor: closing in but NO @ $%.3f (need >= $0.99), HOLD",
-                city_slug, date_str, current_no)
+    logger.info("[%s/%s] Monitor: closing in + dist=%.1f > 1.0, HOLD (NO=$%.3f)",
+                city_slug, date_str, distance_to_threshold, current_no)
     return "hold"
