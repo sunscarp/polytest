@@ -1,0 +1,531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NO Trading Simulator</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #0a0e17;
+    --surface: #111827;
+    --surface2: #1a2234;
+    --border: #1e2d45;
+    --text: #e2e8f0;
+    --text-dim: #64748b;
+    --accent: #22d3ee;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --purple: #a78bfa;
+    --orange: #f97316;
+    --font: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    --mono: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--font); line-height: 1.5; min-height: 100vh;
+  }
+  .container { max-width: 1500px; margin: 0 auto; padding: 20px; }
+
+  .header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 16px 0; margin-bottom: 20px; border-bottom: 1px solid var(--border);
+  }
+  .header h1 { font-size: 1.3rem; font-weight: 700; letter-spacing: 0.5px; }
+  .header h1 span { color: var(--accent); }
+  .header h1 .no-tag { color: var(--red); }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 6px;
+    background: var(--green); animation: pulse 2s infinite;
+  }
+  .status-dot.offline { background: var(--red); animation: none; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .header-right { display: flex; align-items: center; gap: 16px; font-size: 0.85rem; color: var(--text-dim); }
+
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; margin-bottom: 20px; }
+  .stat-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 16px 18px; position: relative; overflow: hidden;
+  }
+  .stat-card::before {
+    content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px;
+    background: var(--accent); opacity: 0.4;
+  }
+  .stat-card.green::before { background: var(--green); }
+  .stat-card.red::before { background: var(--red); }
+  .stat-card.purple::before { background: var(--purple); }
+  .stat-card.yellow::before { background: var(--yellow); }
+  .stat-card.orange::before { background: var(--orange); }
+  .stat-label {
+    font-size: 0.72rem; color: var(--text-dim); text-transform: uppercase;
+    letter-spacing: 1px; margin-bottom: 4px;
+  }
+  .stat-value { font-size: 1.5rem; font-weight: 700; font-family: var(--mono); }
+  .stat-sub { font-size: 0.72rem; color: var(--text-dim); margin-top: 2px; font-family: var(--mono); }
+  .stat-value.positive { color: var(--green); }
+  .stat-value.negative { color: var(--red); }
+
+  .panels { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+  @media (max-width: 960px) { .panels { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 18px; min-height: 200px;
+  }
+  .panel-full { grid-column: 1 / -1; }
+  .panel h2 {
+    font-size: 0.82rem; text-transform: uppercase; letter-spacing: 1px;
+    color: var(--text-dim); margin-bottom: 14px; padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+  }
+  .chart-wrap { position: relative; height: 220px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 0.8rem; }
+  th {
+    text-align: left; padding: 7px 8px; color: var(--text-dim);
+    font-weight: 600; font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+  }
+  td { padding: 7px 8px; border-bottom: 1px solid var(--border); font-family: var(--mono); font-size: 0.78rem; }
+  tr:last-child td { border-bottom: none; }
+  tr:hover td { background: var(--surface2); }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 0.68rem; font-weight: 600; text-transform: uppercase;
+  }
+  .badge-win { background: rgba(34,197,94,0.15); color: var(--green); }
+  .badge-loss { background: rgba(239,68,68,0.15); color: var(--red); }
+  .badge-open { background: rgba(34,211,238,0.15); color: var(--accent); }
+  .badge-hold { background: rgba(100,116,139,0.15); color: var(--text-dim); }
+  .badge-sell { background: rgba(234,179,8,0.15); color: var(--yellow); }
+  .badge-tighten { background: rgba(249,115,22,0.15); color: var(--orange); }
+  .pnl-pos { color: var(--green); }
+  .pnl-neg { color: var(--red); }
+  .text-dim { color: var(--text-dim); }
+  .text-sm { font-size: 0.7rem; }
+  .mono { font-family: var(--mono); }
+  .empty-state { text-align: center; padding: 40px 20px; color: var(--text-dim); }
+
+  .event-log { max-height: 360px; overflow-y: auto; }
+  .event-log::-webkit-scrollbar { width: 6px; }
+  .event-log::-webkit-scrollbar-track { background: var(--surface2); }
+  .event-log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .event-row {
+    display: grid; grid-template-columns: 70px 90px 1fr 70px;
+    gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border);
+    font-size: 0.75rem; align-items: center;
+  }
+  .event-row:last-child { border-bottom: none; }
+  .event-ts { color: var(--text-dim); font-family: var(--mono); font-size: 0.7rem; }
+  .event-city { font-weight: 600; }
+  .event-detail { color: var(--text-dim); }
+
+  .refresh-bar {
+    position: fixed; top: 0; left: 0; height: 2px; background: var(--accent);
+    transition: width 0.3s ease; z-index: 100;
+  }
+  .timer-badge {
+    display: inline-flex; align-items: center; gap: 5px;
+    background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+    padding: 3px 10px; font-family: var(--mono); font-size: 0.72rem; color: var(--text-dim);
+  }
+  .timer-badge .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+  }
+  .timer-badge .dot.metar { background: var(--green); }
+  .timer-badge .dot.scan { background: var(--purple); }
+  .timer-badge .dot.overdue { background: var(--red); animation: pulse 1s infinite; }
+</style>
+</head>
+<body>
+
+<div class="refresh-bar" id="refreshBar"></div>
+
+<div class="container">
+  <div class="header">
+    <h1>WEATHER <span class="no-tag">NO</span> SIMULATOR</h1>
+    <div class="header-right">
+      <div class="timer-badge"><span class="dot metar" id="metarDot"></span>METAR <span id="metarCountdown">--</span></div>
+      <div class="timer-badge"><span class="dot scan" id="scanDot"></span>Scan <span id="scanCountdown">--</span></div>
+      <span><span class="status-dot" id="statusDot"></span><span id="statusText">Connected</span></span>
+      <span id="lastUpdate"></span>
+    </div>
+  </div>
+
+  <div class="stats">
+    <div class="stat-card">
+      <div class="stat-label">Balance</div>
+      <div class="stat-value" id="statBalance">$--</div>
+      <div class="stat-sub" id="statReturn">--</div>
+    </div>
+    <div class="stat-card green">
+      <div class="stat-label">Win Rate</div>
+      <div class="stat-value" id="statWinRate">--</div>
+      <div class="stat-sub" id="statRecord">--</div>
+    </div>
+    <div class="stat-card purple">
+      <div class="stat-label">Open Positions</div>
+      <div class="stat-value" id="statOpen">0</div>
+      <div class="stat-sub" id="statCommitted">--</div>
+    </div>
+    <div class="stat-card red">
+      <div class="stat-label">Total P/L</div>
+      <div class="stat-value" id="statPnl">$0</div>
+      <div class="stat-sub" id="statPnlSub">--</div>
+    </div>
+    <div class="stat-card yellow">
+      <div class="stat-label">Closed</div>
+      <div class="stat-value" id="statClosed">0</div>
+      <div class="stat-sub" id="statAvgHold">--</div>
+    </div>
+  </div>
+
+  <div class="panels">
+    <div class="panel panel-full">
+      <h2>Balance History</h2>
+      <div class="chart-wrap"><canvas id="balanceChart"></canvas></div>
+    </div>
+  </div>
+
+  <div class="panels">
+    <div class="panel">
+      <h2>Open Positions</h2>
+      <div id="positionsTable"></div>
+    </div>
+    <div class="panel">
+      <h2>Trade History</h2>
+      <div id="closedTable"></div>
+    </div>
+  </div>
+
+  <div class="panels">
+    <div class="panel panel-full">
+      <h2>Monitoring Events</h2>
+      <div id="eventLog" class="event-log"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const REFRESH_MS = 15000;
+let chart = null;
+let botTimers = { last_full_scan: 0, last_weather_poll: 0, metar_poll_seconds: 45, weather_poll_seconds: 600 };
+
+function $(id) { return document.getElementById(id); }
+function pnlClass(v) { return v >= 0 ? 'pnl-pos' : 'pnl-neg'; }
+function pnlStr(v) { return (v >= 0 ? '+' : '') + '$' + Math.abs(v).toFixed(2); }
+function fmt$(v) { return '$' + Number(v).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2}); }
+function timeAgo(iso) {
+  if (!iso) return '';
+  const d = new Date(iso);
+  const s = Math.floor((Date.now() - d) / 1000);
+  if (s < 0) return 'just now';
+  if (s < 60) return s + 's ago';
+  if (s < 3600) return Math.floor(s/60) + 'm ago';
+  if (s < 86400) return Math.floor(s/3600) + 'h ago';
+  return Math.floor(s/86400) + 'd ago';
+}
+function shortTime(iso) {
+  if (!iso) return '--';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  } catch { return iso.slice(11,19); }
+}
+
+function actionBadge(action) {
+  if (!action) return '';
+  const map = {
+    hold: 'badge-hold',
+    sell_take_profit: 'badge-win',
+    sell_stop_loss: 'badge-loss',
+    tighten: 'badge-tighten',
+    wait_for_stop: 'badge-sell',
+  };
+  const cls = map[action] || 'badge-open';
+  const label = (action || '?').replace(/_/g, ' ');
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+function reasonBadge(reason) {
+  const map = {
+    take_profit: 'badge-win', stop_loss: 'badge-loss',
+    monitor_sell: 'badge-sell', resolution_win: 'badge-win',
+    resolution_loss: 'badge-loss',
+  };
+  const cls = map[reason] || 'badge-open';
+  const label = (reason || '?').replace(/_/g, ' ');
+  return `<span class="badge ${cls}">${label}</span>`;
+}
+
+function initChart(data) {
+  const ctx = $('balanceChart').getContext('2d');
+  const labels = data.map(d => d.label || d.ts || '');
+  const values = data.map(d => d.balance);
+  const gradient = ctx.createLinearGradient(0, 0, 0, 220);
+  gradient.addColorStop(0, 'rgba(34,211,238,0.25)');
+  gradient.addColorStop(1, 'rgba(34,211,238,0.0)');
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels: labels,
+      datasets: [{
+        data: values,
+        borderColor: '#22d3ee',
+        backgroundColor: gradient,
+        borderWidth: 2, fill: true, tension: 0.3,
+        pointRadius: values.length < 20 ? 4 : 0,
+        pointBackgroundColor: '#22d3ee',
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#1a2234', borderColor: '#1e2d45', borderWidth: 1,
+          titleColor: '#64748b', bodyColor: '#e2e8f0',
+          bodyFont: { family: 'Consolas, monospace' },
+          callbacks: { label: ctx => '$' + ctx.parsed.y.toLocaleString(undefined, {minimumFractionDigits: 2}) }
+        }
+      },
+      scales: {
+        x: { display: false },
+        y: {
+          grid: { color: 'rgba(30,45,69,0.5)' },
+          ticks: { color: '#64748b', font: { family: 'Consolas', size: 11 }, callback: v => '$' + v.toLocaleString() }
+        }
+      }
+    }
+  });
+}
+
+function updateChart(data) {
+  if (!chart) { initChart(data); return; }
+  chart.data.labels = data.map(d => d.label || d.ts || '');
+  chart.data.datasets[0].data = data.map(d => d.balance);
+  chart.update('none');
+}
+
+function renderPositions(positions) {
+  if (!positions.length) {
+    $('positionsTable').innerHTML = '<div class="empty-state">No open positions</div>';
+    return;
+  }
+  let html = '';
+  for (const p of positions) {
+    const curPrice = p.current_no_price || p.entry_no_price;
+    const pnl = p.bet_size * (curPrice / p.entry_no_price - 1.0);
+    const pnlPct = ((curPrice / p.entry_no_price - 1.0) * 100);
+    const lastEvt = p.last_event || {};
+    const metarNow = p.last_metar_temp;
+    const localTime = p.last_monitored ? shortTime(p.last_monitored) : '--';
+    const distances = (p.metar_distances || []).slice(-5);
+    const trend = distances.length >= 2
+      ? (distances[distances.length-1] < distances[distances.length-2] ? '&#9660;' : distances[distances.length-1] > distances[distances.length-2] ? '&#9650;' : '&#9644;')
+      : '';
+
+    html += `<div style="background:var(--surface2);border:1px solid var(--border);border-radius:8px;padding:14px;margin-bottom:10px;">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+        <div>
+          <span style="font-weight:700;font-size:1rem;">${p.city_slug.toUpperCase()}</span>
+          <span class="text-dim" style="margin-left:8px;">${p.date}</span>
+          <span class="badge badge-open" style="margin-left:8px;">${p.bucket}</span>
+        </div>
+        <div style="text-align:right;">
+          <span style="font-family:var(--mono);font-size:0.82rem;" class="${pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${pnl >= 0 ? '+' : ''}$${Math.abs(pnl).toFixed(2)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)</span>
+        </div>
+      </div>
+      <div style="display:grid;grid-template-columns:repeat(7,1fr);gap:8px;font-size:0.78rem;font-family:var(--mono);">
+        <div>
+          <div class="text-dim text-sm">Entry NO</div>
+          <div>$${p.entry_no_price.toFixed(3)}</div>
+        </div>
+        <div>
+          <div class="text-dim text-sm">Live NO</div>
+          <div style="color:var(--accent);">$${curPrice.toFixed(3)}</div>
+        </div>
+        <div>
+          <div class="text-dim text-sm">Bet</div>
+          <div>$${p.bet_size.toFixed(2)}</div>
+        </div>
+        <div>
+          <div class="text-dim text-sm">WC Forecast</div>
+          <div>${p.weather_com_high != null ? p.weather_com_high + '&deg;' : '--'}</div>
+        </div>
+        <div>
+          <div class="text-dim text-sm">METAR Now</div>
+          <div>${metarNow != null ? metarNow.toFixed(1) + '&deg; ' + trend : '--'}</div>
+        </div>
+        <div>
+          <div class="text-dim text-sm">Bucket Dist</div>
+          <div>${p.distance.toFixed(1)}&deg;</div>
+        </div>
+        <div>
+          <div class="text-dim text-sm">Last Check</div>
+          <div>${localTime}</div>
+        </div>
+      </div>
+      ${lastEvt.action ? `<div style="margin-top:8px;font-size:0.75rem;">${actionBadge(lastEvt.action)} <span class="text-dim">METAR ${metarNow != null ? metarNow.toFixed(1) : '--'} vs WC hourly ${lastEvt.wc_current || '--'} (diff=${lastEvt.diff || '--'})</span></div>` : ''}
+    </div>`;
+  }
+  $('positionsTable').innerHTML = html;
+}
+
+function renderClosed(trades) {
+  if (!trades.length) {
+    $('closedTable').innerHTML = '<div class="empty-state">No closed trades yet</div>';
+    return;
+  }
+  const shown = trades.slice(0, 30);
+  let html = `<table><thead><tr>
+    <th>City</th><th>Date</th><th>Bucket</th><th>Bet</th><th>P/L</th>
+    <th>Reason</th><th>Hold</th>
+  </tr></thead><tbody>`;
+  for (const t of shown) {
+    const won = (t.pnl || 0) >= 0;
+    const hold = t.hold_time_hours != null ? t.hold_time_hours.toFixed(1) + 'h' : '--';
+    html += `<tr>
+      <td style="font-weight:600">${t.city_slug.toUpperCase()}</td>
+      <td class="text-dim">${t.date}</td>
+      <td>${t.bucket}</td>
+      <td>$${(t.bet_size || 0).toFixed(2)}</td>
+      <td class="${pnlClass(t.pnl)}">${pnlStr(t.pnl || 0)}</td>
+      <td>${reasonBadge(t.exit_reason)}</td>
+      <td class="text-dim">${hold}</td>
+    </tr>`;
+  }
+  html += '</tbody></table>';
+  $('closedTable').innerHTML = html;
+}
+
+function renderEvents(events) {
+  if (!events.length) {
+    $('eventLog').innerHTML = '<div class="empty-state">No monitoring events yet</div>';
+    return;
+  }
+  let html = '';
+  for (const e of events.slice(0, 50)) {
+    const city = e.city_slug ? e.city_slug.toUpperCase() : (e.key || '').split('_')[0].toUpperCase();
+    const ts = shortTime(e.ts);
+    let detail = '';
+    if (e.type === 'entry') {
+      detail = `<span class="badge badge-open">BUY</span> $${(e.bet_size||0).toFixed(2)} NO @ $${(e.entry_no_price||0).toFixed(3)} | dist=${(e.distance||0).toFixed(1)} | WC=${e.weather_com_high || '?'} | OM=${e.open_meteo_high || '?'}`;
+    } else if (e.type === 'exit') {
+      const pnl = e.pnl || 0;
+      detail = `<span class="badge ${pnl >= 0 ? 'badge-win' : 'badge-loss'}">SELL</span> ${reasonBadge(e.exit_reason)} PnL: <span class="${pnlClass(pnl)}">${pnlStr(pnl)}</span> | exit @ $${(e.exit_no_price || 0).toFixed(3)}`;
+    } else {
+      const parts = [];
+      parts.push(`METAR <b>${e.metar_temp != null ? e.metar_temp.toFixed(1) : '--'}</b>`);
+      parts.push(`WC hourly <b>${e.wc_current != null ? e.wc_current : '--'}</b>`);
+      parts.push(`diff=${e.diff || '--'}`);
+      parts.push(`dist=${e.distance_to_threshold != null ? e.distance_to_threshold.toFixed(1) : '--'}`);
+      if (e.running_cool !== undefined) parts.push(e.running_cool ? '<span style="color:var(--yellow);">cool</span>' : 'warm');
+      if (e.closing_in) parts.push('<span style="color:var(--orange);">CLOSING IN</span>');
+      if (e.pnl_pct != null) parts.push(`<span class="${pnlClass(e.pnl_pct)}">${e.pnl_pct > 0 ? '+' : ''}${e.pnl_pct.toFixed(1)}%</span>`);
+      parts.push(actionBadge(e.action));
+      if (e.reason) parts.push(`<span class="text-dim">${e.reason}</span>`);
+      detail = parts.join(' &middot; ');
+    }
+    html += `<div class="event-row">
+      <span class="event-ts">${ts}</span>
+      <span class="event-city">${city}</span>
+      <span class="event-detail">${detail}</span>
+      <span class="text-dim text-sm">${e.date || ''}</span>
+    </div>`;
+  }
+  $('eventLog').innerHTML = html;
+}
+
+async function refresh() {
+  const bar = $('refreshBar');
+  bar.style.width = '0%';
+  bar.style.transition = 'none';
+  requestAnimationFrame(() => { bar.style.transition = 'width 0.5s ease'; bar.style.width = '100%'; });
+
+  try {
+    const res = await fetch('/api/all');
+    if (!res.ok) throw new Error(res.status);
+    const data = await res.json();
+    const s = data.summary;
+
+    // Stats
+    $('statBalance').textContent = fmt$(s.balance);
+    $('statBalance').className = 'stat-value ' + (s.balance >= s.starting_bankroll ? 'positive' : 'negative');
+    $('statReturn').textContent = (s.total_return >= 0 ? '+' : '') + s.total_return_pct + '% from ' + fmt$(s.starting_bankroll);
+    $('statReturn').className = 'stat-sub ' + (s.total_return >= 0 ? 'pnl-pos' : 'pnl-neg');
+
+    $('statWinRate').textContent = s.positions_closed ? s.win_rate + '%' : '--';
+    $('statRecord').textContent = s.positions_closed ? s.wins + 'W / ' + s.losses + 'L' : 'no trades yet';
+
+    $('statOpen').textContent = s.positions_still_open;
+    $('statCommitted').textContent = s.positions_still_open ? '$' + s.total_committed.toFixed(2) + ' committed' : '';
+
+    $('statPnl').textContent = (s.total_pnl >= 0 ? '+' : '') + '$' + Math.abs(s.total_pnl).toFixed(2);
+    $('statPnl').className = 'stat-value ' + (s.total_pnl >= 0 ? 'positive' : 'negative');
+    $('statPnlSub').textContent = s.positions_closed + ' closed trades';
+
+    $('statClosed').textContent = s.positions_closed;
+    $('statAvgHold').textContent = s.positions_closed ? 'avg ' + s.avg_hold_hours + 'h hold' : '';
+
+    // Chart
+    updateChart(s.balance_history);
+
+    // Tables
+    renderPositions(data.positions);
+    renderClosed(data.closed);
+    renderEvents(data.events);
+
+    // Timers
+    if (data.timers) {
+      botTimers = data.timers;
+      updateCountdowns();
+    }
+
+    // Status
+    $('statusDot').className = 'status-dot';
+    $('statusText').textContent = 'Connected';
+    $('lastUpdate').textContent = 'Updated ' + new Date().toLocaleTimeString();
+
+  } catch (e) {
+    $('statusDot').className = 'status-dot offline';
+    $('statusText').textContent = 'Disconnected';
+  }
+}
+
+function updateCountdowns() {
+  const now = Date.now() / 1000;
+  const metarSec = Math.max(0, Math.round((botTimers.last_weather_poll + botTimers.metar_poll_seconds) - now));
+  const scanSec = Math.max(0, Math.round((botTimers.last_full_scan + botTimers.weather_poll_seconds) - now));
+
+  const metarEl = $('metarCountdown');
+  const scanEl = $('scanCountdown');
+  const metarDot = $('metarDot');
+  const scanDot = $('scanDot');
+
+  if (metarSec <= 0 && botTimers.last_weather_poll > 0) {
+    metarEl.textContent = 'now';
+    metarDot.className = 'dot metar overdue';
+  } else {
+    metarEl.textContent = metarSec + 's';
+    metarDot.className = 'dot metar';
+  }
+
+  if (scanSec <= 0 && botTimers.last_full_scan > 0) {
+    scanEl.textContent = 'now';
+    scanDot.className = 'dot scan overdue';
+  } else {
+    scanEl.textContent = scanSec + 's';
+    scanDot.className = 'dot scan';
+  }
+}
+
+setInterval(updateCountdowns, 1000);
+
+refresh();
+setInterval(refresh, REFRESH_MS);
+</script>
+</body>
+</html>

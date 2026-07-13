@@ -1,0 +1,21 @@
+[
+  {
+    "type": "entry",
+    "ts": "2026-07-13T13:50:27.988732+00:00",
+    "city_slug": "san-francisco",
+    "date": "2026-07-13",
+    "market_id": "2888007",
+    "question": "Will the highest temperature in San Francisco be between 78-79°F on July 13?",
+    "bucket_low": 78.0,
+    "bucket_high": 79.0,
+    "bet_size": 3.0,
+    "entry_no_price": 0.875,
+    "entry_yes_price": 0.125,
+    "shares": 3.43,
+    "weather_com_high": 74.0,
+    "open_meteo_high": 70.0,
+    "distance": 4.0,
+    "opened_at": "2026-07-13T13:50:27.987264+00:00",
+    "monitoring_events": []
+  }
+]
