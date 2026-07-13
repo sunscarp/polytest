@@ -205,6 +205,26 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
                     city_slug, date_str, diff, unit)
         return "hold"
 
+    # 4b. $0.99 sell — fire regardless of proximity or trend
+    if current_no_price is not None and current_no_price >= 0.99:
+        event = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "wc_current": wc_current,
+            "metar_temp": metar_temp,
+            "metar_temp_c": metar_temp_c,
+            "diff": round(diff, 2),
+            "distance_to_threshold": 0,
+            "closing_in": False,
+            "in_profit": True,
+            "pnl_pct": 0,
+            "action": "sell_take_profit",
+            "reason": "no_at_99",
+        }
+        sim.add_monitoring_event(city_slug, date_str, event)
+        logger.info("[%s/%s] NO @ $%.3f >= $0.99, SELL TAKE PROFIT",
+                    city_slug, date_str, current_no_price)
+        return "sell"
+
     # 5. Calculate distance to bucket threshold
     bucket_mid = (position["bucket_low"] + position["bucket_high"]) / 2
     if position["bucket_low"] == -999:
@@ -276,14 +296,6 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
     }
 
     # 9. Case analysis
-    if current_no >= 0.99:
-        # NO at $0.99+ — lock in profit regardless of trend
-        event["action"] = "sell_take_profit"
-        sim.add_monitoring_event(city_slug, date_str, event)
-        logger.info("[%s/%s] Case B: NO @ $%.3f >= $0.99, SELL TAKE PROFIT",
-                    city_slug, date_str, current_no)
-        return "sell"
-
     if not closing_in:
         # Case A: temp NOT trending toward threshold → HOLD
         event["action"] = "hold"

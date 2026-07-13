@@ -18,7 +18,7 @@ PROXIMITY_THRESHOLD = 10.0    # only trigger exit actions when METAR within this
 METAR_CLOSE_READINGS = 2      # need this many consecutive METAR readings trending toward bucket
 
 # ── Market Discovery ──────────────────────────────────────────────────────
-LOOK_AHEAD_DAYS = 1           # only today's markets
+LOOK_AHEAD_DAYS = 2           # today + tomorrow (covers IST midnight gap)
 MIN_NO_PRICE = 0.50           # only buy NO if YES price < this (NO is cheap)
 MAX_NO_PRICE = 0.90           # skip if NO price > this (too expensive, low upside)
 MIN_VOLUME = 100              # skip low-volume markets
