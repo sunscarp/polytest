@@ -49,7 +49,7 @@ def main():
     bot_only = "--bot" in args
 
     print(f"\n{'='*50}")
-    print(f"  NO TRADING SIMULATOR LAUNCHER")
+    print(f"  NO TRADING BOT LAUNCHER (LIVE)")
     print(f"{'='*50}")
 
     if dash_only:

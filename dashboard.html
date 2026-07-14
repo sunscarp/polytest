@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>NO Trading Simulator</title>
+<title>NO Trading Bot</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <style>
   :root {
@@ -100,6 +100,14 @@
   .badge-hold { background: rgba(100,116,139,0.15); color: var(--text-dim); }
   .badge-sell { background: rgba(234,179,8,0.15); color: var(--yellow); }
   .badge-tighten { background: rgba(249,115,22,0.15); color: var(--orange); }
+  .btn-sell {
+    background: var(--red); color: #fff; border: none; border-radius: 6px;
+    padding: 6px 14px; font-size: 0.75rem; font-weight: 700; cursor: pointer;
+    text-transform: uppercase; letter-spacing: 0.5px; transition: all 0.15s;
+  }
+  .btn-sell:hover { background: #dc2626; transform: scale(1.05); }
+  .btn-sell:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+  .btn-sell.selling { background: var(--yellow); color: #000; }
   .pnl-pos { color: var(--green); }
   .pnl-neg { color: var(--red); }
   .text-dim { color: var(--text-dim); }
@@ -144,7 +152,7 @@
 
 <div class="container">
   <div class="header">
-    <h1>WEATHER <span class="no-tag">NO</span> SIMULATOR</h1>
+    <h1>WEATHER <span class="no-tag">NO</span> TRADER</h1>
     <div class="header-right">
       <div class="timer-badge" id="regionBadge" style="color:var(--yellow);"><span class="dot" style="background:var(--yellow);"></span><span id="regionText">--</span></div>
       <div class="timer-badge"><span class="dot metar" id="metarDot"></span>METAR <span id="metarCountdown">--</span></div>
@@ -370,6 +378,9 @@ function renderPositions(positions) {
         </div>
       </div>
       ${lastEvt.action ? `<div style="margin-top:8px;font-size:0.75rem;">${actionBadge(lastEvt.action)} <span class="text-dim">METAR ${metarNow != null ? metarNow.toFixed(1) : '--'} vs WC hourly ${lastEvt.wc_current || '--'} (diff=${lastEvt.diff || '--'})</span></div>` : ''}
+      <div style="margin-top:10px;display:flex;justify-content:flex-end;">
+        <button class="btn-sell" onclick="sellPosition('${p.key}')" id="sellBtn_${p.key.replace(/[^a-zA-Z0-9]/g, '_')}">SELL</button>
+      </div>
     </div>`;
   }
   $('positionsTable').innerHTML = html;
@@ -438,6 +449,42 @@ function renderEvents(events) {
     </div>`;
   }
   $('eventLog').innerHTML = html;
+}
+
+async function sellPosition(key) {
+  const btnId = 'sellBtn_' + key.replace(/[^a-zA-Z0-9]/g, '_');
+  const btn = document.getElementById(btnId);
+  if (!btn) return;
+
+  if (!confirm(`Sell position ${key}?`)) return;
+
+  btn.disabled = true;
+  btn.textContent = 'SELLING...';
+  btn.classList.add('selling');
+
+  try {
+    const res = await fetch('/api/sell', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ key: key }),
+    });
+    const data = await res.json();
+    if (data.ok) {
+      btn.textContent = 'SOLD!';
+      btn.style.background = 'var(--green)';
+      setTimeout(() => refresh(), 2000);
+    } else {
+      btn.textContent = 'FAILED';
+      btn.disabled = false;
+      btn.classList.remove('selling');
+      alert('Sell failed: ' + (data.error || 'unknown error'));
+    }
+  } catch (e) {
+    btn.textContent = 'ERROR';
+    btn.disabled = false;
+    btn.classList.remove('selling');
+    alert('Sell error: ' + e.message);
+  }
 }
 
 async function refresh() {

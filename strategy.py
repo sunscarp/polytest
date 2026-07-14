@@ -22,6 +22,15 @@ from data_sources import weather_com, open_meteo, aviation_weather, polymarket
 logger = logging.getLogger(__name__)
 
 
+def _record_event(position: dict, event: dict, sim=None):
+    """Record a monitoring event — via simulator or directly to position."""
+    if sim is not None:
+        # Will be handled by simulator
+        pass
+    else:
+        position.setdefault("monitoring_events", []).append(event)
+
+
 # ── Entry Logic ───────────────────────────────────────────────────────────
 
 def evaluate_entry(city_slug: str, station: dict, date_str: str) -> Optional[dict]:
@@ -120,6 +129,8 @@ def evaluate_entry(city_slug: str, station: dict, date_str: str) -> Optional[dic
                 "city_slug": city_slug,
                 "date": date_str,
                 "market_id": bucket["market_id"],
+                "token_id": bucket.get("token_id", ""),
+                "neg_risk": bucket.get("neg_risk", False),
                 "question": bucket["question"],
                 "bucket_range": (t_low, t_high),
                 "threshold": threshold,
@@ -135,15 +146,12 @@ def evaluate_entry(city_slug: str, station: dict, date_str: str) -> Optional[dic
         logger.info("[%s/%s] No entry signal found", city_slug, date_str)
         return None
 
-    # Calculate bet size: linear interpolation $1-$3 based on 2-4°C distance
-    d = best_signal["distance"]
-    bet_size = 1.0 + (d - DISTANCE_MIN) / (DISTANCE_MAX - DISTANCE_MIN) * (3.0 - 1.0)
-    bet_size = max(1.0, min(3.0, bet_size))
-    best_signal["bet_size"] = round(bet_size, 2)
+    # Fixed $1 bet for real testing
+    best_signal["bet_size"] = 1.0
 
     logger.info("ENTRY SIGNAL %s/%s: high=%.1f threshold=%.1f dist=%.1f bet=$%.2f NO@$%.3f",
                 city_slug, date_str, wc_high, best_signal["threshold"],
-                d, bet_size, best_signal["no_price"])
+                best_signal["distance"], best_signal["bet_size"], best_signal["no_price"])
 
     return best_signal
 
@@ -151,7 +159,7 @@ def evaluate_entry(city_slug: str, station: dict, date_str: str) -> Optional[dic
 # ── Monitoring State Machine ──────────────────────────────────────────────
 
 def monitor_position(city_slug: str, station: dict, date_str: str,
-                     position: dict, sim,
+                     position: dict, sim=None,
                      current_no_price: Optional[float] = None) -> Optional[str]:
     """
     Monitor an open position and decide action.
@@ -220,7 +228,7 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
             "action": "sell_take_profit",
             "reason": "no_at_99",
         }
-        sim.add_monitoring_event(city_slug, date_str, event)
+        _record_event(position, event, sim)
         logger.info("[%s/%s] NO @ $%.3f >= $0.99, SELL TAKE PROFIT",
                     city_slug, date_str, current_no_price)
         return "sell"
@@ -250,7 +258,7 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
             "action": "hold",
             "reason": "too_far_from_bucket",
         }
-        sim.add_monitoring_event(city_slug, date_str, event)
+        _record_event(position, event, sim)
         logger.info("[%s/%s] Monitor: METAR %.1f is %.1f from bucket (too far), holding",
                     city_slug, date_str, metar_temp, distance_to_threshold)
         return "hold"
@@ -299,7 +307,7 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
     if not closing_in:
         # Case A: temp NOT trending toward threshold → HOLD
         event["action"] = "hold"
-        sim.add_monitoring_event(city_slug, date_str, event)
+        _record_event(position, event, sim)
         logger.info("[%s/%s] Case A: dist=%.1f not shrinking, HOLD (METAR=%.1f)",
                     city_slug, date_str, distance_to_threshold, metar_temp)
         return "hold"
@@ -308,7 +316,7 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
         if distance_to_threshold >= DISTANCE_MIN:
             # Case C: closing in + loss + still some distance → MONITOR CLOSELY
             event["action"] = "tighten"
-            sim.add_monitoring_event(city_slug, date_str, event)
+            _record_event(position, event, sim)
             logger.info("[%s/%s] Case C: closing in + loss + dist=%.1f, TIGHTEN",
                         city_slug, date_str, distance_to_threshold)
             return "tighten"
@@ -316,13 +324,13 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
         # Case D: closing in + loss + very close to bucket → stop loss
         if pnl_pct <= STOP_LOSS_PCT:
             event["action"] = "sell_stop_loss"
-            sim.add_monitoring_event(city_slug, date_str, event)
+            _record_event(position, event, sim)
             logger.info("[%s/%s] Case D: stop hit (%.1f%%), SELL STOP LOSS",
                         city_slug, date_str, pnl_pct * 100)
             return "sell"
 
         event["action"] = "wait_for_stop"
-        sim.add_monitoring_event(city_slug, date_str, event)
+        _record_event(position, event, sim)
         logger.info("[%s/%s] Case D: closing in + loss + close, WAIT (pnl=%.1f%%)",
                     city_slug, date_str, pnl_pct * 100)
         return "wait_for_stop"
@@ -331,7 +339,7 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
     if distance_to_threshold <= 1.0:
         # Temp within 1°C of bucket — lock in profit
         event["action"] = "sell_take_profit"
-        sim.add_monitoring_event(city_slug, date_str, event)
+        _record_event(position, event, sim)
         logger.info("[%s/%s] Case B2: closing in + dist=%.1f <= 1.0, SELL TAKE PROFIT (NO=$%.3f)",
                     city_slug, date_str, distance_to_threshold, current_no)
         return "sell"

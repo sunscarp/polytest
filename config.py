@@ -1,9 +1,26 @@
 """Configuration constants for the weather NO trading simulator."""
 
+import os
+import pathlib
+from dotenv import load_dotenv
+
+# Load .env from project root
+_env_path = pathlib.Path(__file__).parent / ".env"
+if _env_path.exists():
+    load_dotenv(_env_path)
+
+# ── Polymarket Credentials ────────────────────────────────────────────────
+POLY_PRIVATE_KEY = os.getenv("POLY_PRIVATE_KEY", "")
+POLY_FUNDER_ADDRESS = os.getenv("POLY_FUNDER_ADDRESS", "")
+POLY_SIGNATURE_TYPE = int(os.getenv("POLY_SIGNATURE_TYPE", "1"))
+POLY_CHAIN_ID = int(os.getenv("POLY_CHAIN_ID", "137"))
+POLY_CLOB_HOST = os.getenv("POLY_CLOB_HOST", "https://clob.polymarket.com")
+RELAYER_API_KEY = os.getenv("RELAYER_API_KEY", "")
+
 # ── Bankroll ──────────────────────────────────────────────────────────────
-SHARED_BANKROLL = 10.0
+SHARED_BANKROLL = 3.0
 MIN_BET = 1.0
-MAX_BET = 3.0
+MAX_BET = 1.0
 
 # ── Entry Strategy ────────────────────────────────────────────────────────
 DISTANCE_MIN = 2.0   # minimum °C between weather.com high and bucket threshold
@@ -29,7 +46,6 @@ MAX_RETRIES = 3
 RETRY_DELAY = 3               # seconds between retries
 
 # ── Paths ─────────────────────────────────────────────────────────────────
-import pathlib
 BASE_DIR = pathlib.Path(__file__).parent
 STATIONS_FILE = BASE_DIR / "stations.json"
 LOGS_DIR = BASE_DIR / "logs"

@@ -177,8 +177,23 @@ def get_city_buckets(city_slug: str, date_str: str) -> list[dict]:
         no_price = float(prices[1]) if len(prices) > 1 else 0.5
         volume = float(market.get("volume", 0))
 
+        # Extract CLOB token IDs for order placement
+        # clobTokenIds: [YES_token_id, NO_token_id]
+        clob_token_ids = market.get("clobTokenIds", "")
+        if isinstance(clob_token_ids, str):
+            try:
+                clob_token_ids = json.loads(clob_token_ids) if clob_token_ids else []
+            except json.JSONDecodeError:
+                clob_token_ids = []
+        no_token_id = clob_token_ids[1] if len(clob_token_ids) > 1 else ""
+
+        # Check if neg-risk market
+        neg_risk = market.get("negRisk", False)
+
         buckets.append({
             "market_id": market.get("id", ""),
+            "token_id": no_token_id,
+            "neg_risk": neg_risk,
             "question": question,
             "range": (t_low, t_high),
             "yes_price": yes_price,

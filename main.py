@@ -26,7 +26,7 @@ from config import (
     METAR_POLL_SECONDS, WEATHER_POLL_SECONDS,
     MIN_VOLUME, LOGS_DIR,
 )
-from simulator import Simulator
+import trader
 from strategy import evaluate_entry, monitor_position
 from data_sources import polymarket
 
@@ -123,7 +123,7 @@ def discover_markets(stations: dict, skip_cities: set = None) -> list[dict]:
 
 # ── Entry Scan ────────────────────────────────────────────────────────────
 
-def scan_entries(stations: dict, markets: list[dict], sim: Simulator) -> int:
+def scan_entries(stations: dict, markets: list[dict], state: dict) -> int:
     """
     Evaluate entry signals for all discovered markets.
     Collects ALL signals first, ranks by distance (best spread first),
@@ -137,7 +137,8 @@ def scan_entries(stations: dict, markets: list[dict], sim: Simulator) -> int:
         station = market["station"]
         date_str = market["date_str"]
 
-        if sim.has_position(city_slug, date_str):
+        key = f"{city_slug}_{date_str}"
+        if key in state["open_positions"]:
             continue
 
         signal = evaluate_entry(city_slug, station, date_str)
@@ -150,48 +151,85 @@ def scan_entries(stations: dict, markets: list[dict], sim: Simulator) -> int:
     # Phase 2: rank by distance (largest spread = best NO opportunity)
     all_signals.sort(key=lambda s: s["distance"], reverse=True)
 
-    # Phase 3: open from best to worst, respecting bankroll
+    # Phase 3: open from best to worst, respecting balance
     opened = 0
     for signal in all_signals:
         city_slug = signal["city_slug"]
         date_str = signal["date"]
+        key = f"{city_slug}_{date_str}"
 
-        if sim.has_position(city_slug, date_str):
+        if key in state["open_positions"]:
             continue
 
-        pos = sim.open_position(
-            city_slug=city_slug,
-            date_str=date_str,
-            bet_size=signal["bet_size"],
-            entry_no_price=signal["no_price"],
-            market_id=signal["market_id"],
-            question=signal["question"],
-            bucket_range=signal["bucket_range"],
-            weather_com_high=signal["wc_high"],
-            open_meteo_high=signal["om_high"],
-            distance=signal["distance"],
+        bet_size = signal["bet_size"]
+
+        # Check balance
+        if bet_size > state["balance"]:
+            logger.info("Insufficient balance: $%.2f < $%.2f bet", state["balance"], bet_size)
+            continue
+
+        # Place real order on CLOB
+        token_id = signal.get("token_id", "")
+        if not token_id:
+            logger.warning("No token_id for %s/%s, skipping", city_slug, date_str)
+            continue
+
+        no_price = signal["no_price"]
+        neg_risk = signal.get("neg_risk", False)
+
+        # Calculate shares: bet_size / no_price
+        shares = round(bet_size / no_price, 2) if no_price > 0 else 0
+        if shares <= 0:
+            continue
+
+        logger.info("Placing LIVE BUY: %s/%s | $%.2f NO @ $%.3f (%.2f shares) token=%s",
+                     city_slug, date_str, bet_size, no_price, shares, token_id)
+
+        order_resp = trader.buy_no_tokens(
+            token_id=token_id,
+            price=no_price,
+            size=shares,
+            neg_risk=neg_risk,
         )
-        if pos:
+
+        if order_resp:
+            pos = trader.record_entry(
+                state=state,
+                city_slug=city_slug,
+                date_str=date_str,
+                bet_size=bet_size,
+                entry_no_price=no_price,
+                market_id=signal["market_id"],
+                token_id=token_id,
+                question=signal["question"],
+                bucket_range=signal["bucket_range"],
+                weather_com_high=signal["wc_high"],
+                open_meteo_high=signal["om_high"],
+                distance=signal["distance"],
+                order_resp=order_resp,
+            )
             opened += 1
-            logger.info("OPENED (rank #%d): %s %s -- $%.2f NO @ $%.3f (dist=%.1f)",
+            logger.info("LIVE OPENED (rank #%d): %s %s -- $%.2f NO @ $%.3f (dist=%.1f)",
                         all_signals.index(signal) + 1,
                         city_slug, date_str,
-                        pos["bet_size"], pos["entry_no_price"], signal["distance"])
+                        bet_size, no_price, signal["distance"])
+        else:
+            logger.error("Order failed for %s/%s", city_slug, date_str)
 
     return opened
 
 
 # ── Position Monitoring ──────────────────────────────────────────────────
 
-def monitor_all_positions(stations: dict, sim: Simulator) -> int:
+def monitor_all_positions(stations: dict, state: dict) -> int:
     """
     Monitor all open positions. Returns number of positions closed.
     """
     closed = 0
-    keys_to_check = list(sim.open_positions.keys())
+    keys_to_check = list(state["open_positions"].keys())
 
     for key in keys_to_check:
-        pos = sim.open_positions.get(key)
+        pos = state["open_positions"].get(key)
         if not pos:
             continue
 
@@ -213,11 +251,17 @@ def monitor_all_positions(stations: dict, sim: Simulator) -> int:
             # Check if market resolved
             if price_data.get("closed"):
                 if price_data["yes_price"] >= 0.95:
-                    sim.close_position(city_slug, date_str, "resolution_loss")
+                    # Market resolved YES — we lose
+                    token_id = pos.get("token_id", "")
+                    order_resp = None
+                    if token_id:
+                        order_resp = trader.sell_no_market(token_id, pos.get("shares", 0))
+                    trader.record_exit(state, city_slug, date_str, "resolution_loss")
                 elif price_data["yes_price"] <= 0.05:
-                    sim.close_position(city_slug, date_str, "resolution_win")
+                    # Market resolved NO — we win
+                    trader.record_exit(state, city_slug, date_str, "resolution_win")
                 else:
-                    sim.close_position(city_slug, date_str, "resolution_loss")
+                    trader.record_exit(state, city_slug, date_str, "resolution_loss")
                 closed += 1
                 continue
         else:
@@ -226,18 +270,23 @@ def monitor_all_positions(stations: dict, sim: Simulator) -> int:
             pos["last_monitored"] = datetime.now(timezone.utc).isoformat()
 
         # Run monitoring strategy
-        action = monitor_position(city_slug, station, date_str, pos, sim,
+        action = monitor_position(city_slug, station, date_str, pos, None,
                                    current_no_price=current_no)
 
         if action == "sell":
-            sim.close_position(city_slug, date_str, "monitor_sell", current_no)
+            token_id = pos.get("token_id", "")
+            shares = pos.get("shares", 0)
+            order_resp = None
+            if token_id and shares > 0:
+                order_resp = trader.sell_no_market(token_id, shares)
+            trader.record_exit(state, city_slug, date_str, "monitor_sell", current_no)
             closed += 1
         elif action == "tighten":
             logger.info("Tightening monitoring for %s", key)
 
     # Persist updated prices
     if keys_to_check:
-        sim.save_state()
+        trader.save_state(state)
 
     return closed
 
@@ -247,15 +296,15 @@ def monitor_all_positions(stations: dict, sim: Simulator) -> int:
 def cmd_scan():
     """One-shot: discover markets, evaluate entries, print results."""
     stations = load_stations()
-    sim = Simulator()
+    state = trader.load_state()
 
     IST = timezone(timedelta(hours=5, minutes=30))
     today_ist = datetime.now(IST).strftime("%Y-%m-%d")
     print(f"\n{'='*55}")
-    print(f"  WEATHER NO SIMULATOR — SCAN")
+    print(f"  WEATHER NO TRADER — SCAN (LIVE)")
     print(f"{'='*55}")
-    print(f"  Balance:   ${sim.balance:.2f}")
-    print(f"  Open:      {sim.open_count()}")
+    print(f"  Balance:   ${state['balance']:.2f}")
+    print(f"  Open:      {len(state['open_positions'])}")
     print(f"  IST date:  {today_ist}")
     print(f"  Scanning {len(stations)} cities...\n")
 
@@ -265,23 +314,22 @@ def cmd_scan():
         return
 
     print(f"\n  Found {len(markets)} markets. Evaluating entries...\n")
-    opened = scan_entries(stations, markets, sim)
+    opened = scan_entries(stations, markets, state)
 
     print(f"\n  Scan complete: {opened} new position(s) opened")
-    print(f"  Balance: ${sim.balance:.2f}")
-    sim.print_summary()
+    print(f"  Balance: ${state['balance']:.2f}")
 
 
 def cmd_run():
     """Continuous loop: scan + monitor."""
     stations = load_stations()
-    sim = Simulator()
+    state = trader.load_state()
 
     print(f"\n{'='*55}")
-    print(f"  WEATHER NO SIMULATOR — RUNNING")
+    print(f"  WEATHER NO TRADER — RUNNING (LIVE)")
     print(f"{'='*55}")
-    print(f"  Balance:      ${sim.balance:.2f}")
-    print(f"  Open:         {sim.open_count()}")
+    print(f"  Balance:      ${state['balance']:.2f}")
+    print(f"  Open:         {len(state['open_positions'])}")
     print(f"  METAR poll:   every {METAR_POLL_SECONDS}s")
     print(f"  Weather poll: every {WEATHER_POLL_SECONDS}s")
     print(f"  Ctrl+C to stop\n")
@@ -308,23 +356,22 @@ def cmd_run():
 
                 print(f"[{now_str}] full scan for {today_ist}... ({len(skip_cities)} cities skipped, regions: {get_allowed_regions()})")
                 markets = discover_markets(stations, skip_cities)
-                opened = scan_entries(stations, markets, sim)
+                opened = scan_entries(stations, markets, state)
                 last_full_scan = time.time()
                 last_weather_poll = time.time()
-                print(f"  balance: ${sim.balance:.2f} | open: {sim.open_count()} | new: {opened}")
+                print(f"  balance: ${state['balance']:.2f} | open: {len(state['open_positions'])} | new: {opened}")
 
             # Monitor positions every METAR_POLL_SECONDS
             elif now_ts - last_weather_poll >= METAR_POLL_SECONDS:
-                if sim.open_count() > 0:
-                    print(f"[{now_str}] monitoring {sim.open_count()} position(s)...")
-                    closed = monitor_all_positions(stations, sim)
+                if len(state['open_positions']) > 0:
+                    print(f"[{now_str}] monitoring {len(state['open_positions'])} position(s)...")
+                    closed = monitor_all_positions(stations, state)
                     last_weather_poll = time.time()
-                    print(f"  balance: ${sim.balance:.2f} | closed: {closed}")
+                    print(f"  balance: ${state['balance']:.2f} | closed: {closed}")
 
         except KeyboardInterrupt:
             print(f"\n  Stopping — saving state...")
-            sim.save_state()
-            sim.print_summary()
+            trader.save_state(state)
             break
         except Exception as e:
             logger.error("Error in main loop: %s", e)
@@ -351,32 +398,43 @@ def cmd_run():
 
 def cmd_status():
     """Show current state."""
-    sim = Simulator()
-    sim.print_summary()
+    state = trader.load_state()
+    balance = state.get("balance", 5.0)
+    starting = state.get("starting_bankroll", 5.0)
+    open_pos = state.get("open_positions", {})
+    closed = state.get("closed_positions", [])
 
-    if sim.open_positions:
-        print("  Open positions:")
-        for key, pos in sim.open_positions.items():
+    print(f"\n{'='*55}")
+    print(f"  WEATHER NO TRADER — STATUS (LIVE)")
+    print(f"{'='*55}")
+    print(f"  Balance:    ${balance:.2f} (start ${starting:.2f})")
+    print(f"  Open:       {len(open_pos)}")
+    print(f"  Closed:     {len(closed)}")
+
+    if open_pos:
+        print(f"\n  Open positions:")
+        for key, pos in open_pos.items():
             bucket = f"{pos['bucket_low']}-{pos['bucket_high']}"
-            print(f"    {key}: $%.2f NO @ $%.3f | bucket %s | dist=%.1f°C | opened %s" %
-                  (pos["bet_size"], pos["entry_no_price"], bucket,
-                   pos["distance"], pos["opened_at"][:16]))
-        print()
+            token = pos.get("token_id", "")[:16] + "..."
+            print(f"    {key}: $%.2f NO @ $%.3f | bucket %s | token %s" %
+                  (pos["bet_size"], pos["entry_no_price"], bucket, token))
+    print()
 
 
 def cmd_report():
     """Full report of closed positions."""
-    sim = Simulator()
+    state = trader.load_state()
+    closed = state.get("closed_positions", [])
 
-    if not sim.closed_positions:
+    if not closed:
         print("  No closed positions yet.")
         return
 
     print(f"\n{'='*70}")
-    print(f"  NO TRADING SIMULATOR — TRADE REPORT")
+    print(f"  WEATHER NO TRADER — TRADE REPORT (LIVE)")
     print(f"{'='*70}")
 
-    for pos in sorted(sim.closed_positions, key=lambda x: x.get("closed_at", "")):
+    for pos in sorted(closed, key=lambda x: x.get("closed_at", "")):
         key = f"{pos['city_slug']}_{pos['date']}"
         bucket = f"{pos['bucket_low']}-{pos['bucket_high']}"
         pnl = pos.get("pnl", 0)
@@ -390,7 +448,13 @@ def cmd_report():
               f"[{result}] {reason} ({hold:.1f}h)")
 
     print(f"\n{'='*70}")
-    sim.print_summary()
+
+    total = len(closed)
+    wins = sum(1 for p in closed if (p.get("pnl", 0) or 0) >= 0)
+    total_pnl = sum(p.get("pnl", 0) or 0 for p in closed)
+    print(f"  W/L: {wins}W / {total - wins}L | P/L: {'+'if total_pnl>=0 else ''}${total_pnl:.2f}")
+    print(f"  Balance: ${state.get('balance', 5):.2f}")
+    print()
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────

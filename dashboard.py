@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Weather NO Simulator Dashboard Server
+Weather NO Trader Dashboard Server
 Serves the dashboard HTML and JSON API endpoints.
 Reads live state from logs/simulator_state.json and per-market log files.
 """
@@ -11,10 +11,12 @@ import sys
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
+from urllib.parse import parse_qs
 
 sys.path.insert(0, str(Path(__file__).parent))
 from config import LOGS_DIR
 from data_sources import polymarket
+import trader
 
 STATE_FILE = LOGS_DIR / "simulator_state.json"
 PORT = int(os.environ.get("PORT", os.environ.get("DASHBOARD_PORT", 8081)))
@@ -28,15 +30,24 @@ def read_json(path):
 
 
 def get_state():
-    state = read_json(STATE_FILE)
+    state = trader.load_state()
     if state is None:
         state = {
-            "starting_bankroll": 10.0,
-            "balance": 10.0,
+            "starting_bankroll": 5.0,
+            "balance": 5.0,
             "open_positions": {},
             "closed_positions": [],
         }
     return state
+
+
+def api_balance():
+    """Get real wallet balance from CLOB."""
+    try:
+        balance = trader.get_wallet_balance()
+        return {"balance": balance, "address": os.getenv("POLY_FUNDER_ADDRESS", "")}
+    except Exception as e:
+        return {"balance": None, "error": str(e)}
 
 
 def api_summary():
@@ -215,6 +226,7 @@ def api_all():
         "events": api_events(),
         "timers": api_timers(),
         "regions": api_regions(),
+        "balance": api_balance(),
     }
 
 
@@ -238,6 +250,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response(api_timers())
             elif path == "/api/regions":
                 self._json_response(api_regions())
+            elif path == "/api/balance":
+                self._json_response(api_balance())
             elif path == "/api/all":
                 self._json_response(api_all())
             else:
@@ -248,9 +262,58 @@ class DashboardHandler(SimpleHTTPRequestHandler):
             except Exception:
                 pass
 
-    def _json_response(self, data):
+    def do_POST(self):
+        parsed = urlparse(self.path)
+        path = parsed.path.rstrip("/")
+
+        try:
+            if path == "/api/sell":
+                content_length = int(self.headers.get("Content-Length", 0))
+                body = self.rfile.read(content_length)
+                data = json.loads(body) if body else {}
+                key = data.get("key", "")
+                if not key:
+                    self._json_response({"error": "missing key"}, 400)
+                    return
+
+                parts = key.split("_", 1)
+                if len(parts) != 2:
+                    self._json_response({"error": "invalid key format"}, 400)
+                    return
+
+                city_slug, date_str = parts[0], parts[1]
+                state = get_state()
+                pos = state["open_positions"].get(key)
+                if not pos:
+                    self._json_response({"error": f"no open position for {key}"}, 404)
+                    return
+
+                token_id = pos.get("token_id", "")
+                shares = pos.get("shares", 0)
+                if not token_id or shares <= 0:
+                    self._json_response({"error": "no token_id or shares"}, 400)
+                    return
+
+                # Place market sell order
+                order_resp = trader.sell_no_market(token_id, shares)
+                if order_resp:
+                    # Record exit
+                    current_no = pos.get("current_no_price", pos.get("entry_no_price", 0))
+                    trader.record_exit(state, city_slug, date_str, "manual_sell", current_no, order_resp)
+                    self._json_response({"ok": True, "order": order_resp})
+                else:
+                    self._json_response({"error": "sell order failed"}, 500)
+            else:
+                self.send_error(404)
+        except Exception as e:
+            try:
+                self.send_error(500, str(e))
+            except Exception:
+                pass
+
+    def _json_response(self, data, status=200):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", len(body))
         self.send_header("Access-Control-Allow-Origin", "*")
