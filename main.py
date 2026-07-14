@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from config import (
-    LOOK_AHEAD_DAYS, METAR_POLL_SECONDS, WEATHER_POLL_SECONDS,
+    METAR_POLL_SECONDS, WEATHER_POLL_SECONDS,
     MIN_VOLUME, LOGS_DIR,
 )
 from simulator import Simulator
@@ -70,18 +70,19 @@ def get_allowed_regions() -> set:
 
 def discover_markets(stations: dict, skip_cities: set = None) -> list[dict]:
     """
-    Find all available Polymarket temperature markets for the next N days.
+    Find available Polymarket temperature markets for TODAY in IST only.
     Returns list of {city_slug, station, date_str, event_slug} dicts.
     Cities in skip_cities are not queried (no data available).
     Filters cities by region based on IST time window.
     """
-    now = datetime.now(timezone.utc)
+    IST = timezone(timedelta(hours=5, minutes=30))
+    today_ist = datetime.now(IST).strftime("%Y-%m-%d")
     markets = []
     if skip_cities is None:
         skip_cities = set()
 
     allowed_regions = get_allowed_regions()
-    logger.info("Time-based filter — allowed regions: %s", allowed_regions)
+    logger.info("IST date: %s | allowed regions: %s", today_ist, allowed_regions)
 
     for city_slug, station in stations.items():
         if city_slug in skip_cities:
@@ -91,35 +92,31 @@ def discover_markets(stations: dict, skip_cities: set = None) -> list[dict]:
         if region not in allowed_regions:
             continue
 
-        for day_offset in range(LOOK_AHEAD_DAYS):
-            target = now + timedelta(days=day_offset)
-            date_str = target.strftime("%Y-%m-%d")
+        event = polymarket.get_event(city_slug, today_ist)
+        if event and event.get("markets"):
+            # Check if any bucket has sufficient volume
+            has_volume = any(
+                float(m.get("volume", 0)) >= MIN_VOLUME
+                for m in event.get("markets", [])
+            )
+            if has_volume:
+                markets.append({
+                    "city_slug": city_slug,
+                    "station": station,
+                    "date_str": today_ist,
+                    "event_slug": event.get("slug", ""),
+                    "market_count": len(event.get("markets", [])),
+                })
+                logger.info("Found market: %s %s (%d buckets)",
+                            station["name"], today_ist,
+                            len(event.get("markets", [])))
+        else:
+            # No event/buckets for this city today — skip in future scans
+            skip_cities.add(city_slug)
+            logger.info("No data for %s %s — skipping in future scans",
+                        station["name"], today_ist)
 
-            event = polymarket.get_event(city_slug, date_str)
-            if event and event.get("markets"):
-                # Check if any bucket has sufficient volume
-                has_volume = any(
-                    float(m.get("volume", 0)) >= MIN_VOLUME
-                    for m in event.get("markets", [])
-                )
-                if has_volume:
-                    markets.append({
-                        "city_slug": city_slug,
-                        "station": station,
-                        "date_str": date_str,
-                        "event_slug": event.get("slug", ""),
-                        "market_count": len(event.get("markets", [])),
-                    })
-                    logger.info("Found market: %s %s (%d buckets)",
-                                station["name"], date_str,
-                                len(event.get("markets", [])))
-            else:
-                # No event/buckets for this city today — skip in future scans
-                skip_cities.add(city_slug)
-                logger.info("No data for %s %s — skipping in future scans",
-                            station["name"], date_str)
-
-            time.sleep(0.3)  # rate limit between cities
+        time.sleep(0.3)  # rate limit between cities
 
     return markets
 
@@ -252,12 +249,15 @@ def cmd_scan():
     stations = load_stations()
     sim = Simulator()
 
+    IST = timezone(timedelta(hours=5, minutes=30))
+    today_ist = datetime.now(IST).strftime("%Y-%m-%d")
     print(f"\n{'='*55}")
     print(f"  WEATHER NO SIMULATOR — SCAN")
     print(f"{'='*55}")
     print(f"  Balance:   ${sim.balance:.2f}")
     print(f"  Open:      {sim.open_count()}")
-    print(f"  Scanning {len(stations)} cities, looking ahead {LOOK_AHEAD_DAYS} days...\n")
+    print(f"  IST date:  {today_ist}")
+    print(f"  Scanning {len(stations)} cities...\n")
 
     markets = discover_markets(stations)
     if not markets:
@@ -289,22 +289,24 @@ def cmd_run():
     last_full_scan = 0
     last_weather_poll = 0
     skip_cities = set()
-    current_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    IST = timezone(timedelta(hours=5, minutes=30))
+    current_ist_date = datetime.now(IST).strftime("%Y-%m-%d")
 
     while True:
         now_ts = time.time()
-        now_str = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
+        ist_now = datetime.now(IST)
+        now_str = ist_now.strftime("%H:%M:%S IST")
 
         try:
             # Full market scan every WEATHER_POLL_SECONDS
             if now_ts - last_full_scan >= WEATHER_POLL_SECONDS:
-                # Reset skip list on new day
-                today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-                if today != current_date:
+                # Reset skip list on new IST day
+                today_ist = datetime.now(IST).strftime("%Y-%m-%d")
+                if today_ist != current_ist_date:
                     skip_cities = set()
-                    current_date = today
+                    current_ist_date = today_ist
 
-                print(f"[{now_str}] full scan... ({len(skip_cities)} cities skipped, regions: {get_allowed_regions()})")
+                print(f"[{now_str}] full scan for {today_ist}... ({len(skip_cities)} cities skipped, regions: {get_allowed_regions()})")
                 markets = discover_markets(stations, skip_cities)
                 opened = scan_entries(stations, markets, sim)
                 last_full_scan = time.time()
