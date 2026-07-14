@@ -316,7 +316,7 @@
   },
   "taipei": {
     "name": "Taipei",
-    "icao": "RCTP",
+    "icao": "RCSS",
     "lat": 25.0777,
     "lon": 121.2332,
     "unit": "C",
