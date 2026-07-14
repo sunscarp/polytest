@@ -28,7 +28,7 @@ PAPER_TRADING = True        # True = paper trade with virtual bankroll, no email
 SHARED_BANKROLL = 10.0
 MIN_BET = 1.0
 MAX_BET = 1.0
-MAX_OPEN_PAPER = 1          # max concurrent paper positions
+MAX_OPEN_PAPER = 10         # max concurrent paper positions
 
 # ── Entry Strategy ────────────────────────────────────────────────────────
 DISTANCE_MIN = 2.0
