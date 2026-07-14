@@ -10,40 +10,49 @@ if _env_path.exists():
     load_dotenv(_env_path)
 
 # ── Polymarket Credentials ────────────────────────────────────────────────
-POLY_PRIVATE_KEY = os.getenv("POLY_PRIVATE_KEY", "")
 POLY_FUNDER_ADDRESS = os.getenv("POLY_FUNDER_ADDRESS", "")
-POLY_SIGNATURE_TYPE = int(os.getenv("POLY_SIGNATURE_TYPE", "1"))
-POLY_CHAIN_ID = int(os.getenv("POLY_CHAIN_ID", "137"))
-POLY_CLOB_HOST = os.getenv("POLY_CLOB_HOST", "https://clob.polymarket.com")
-RELAYER_API_KEY = os.getenv("RELAYER_API_KEY", "")
+
+# ── Email (SMTP) ──────────────────────────────────────────────────────────
+SMTP_EMAIL = os.getenv("SMTP_EMAIL", "githubsanskar@gmail.com")
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "qyat gutg rkvg rgsg")
+SMTP_RECIPIENT = os.getenv("SMTP_RECIPIENT", "githubsanskar@gmail.com")
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+
+# ── Mode ──────────────────────────────────────────────────────────────────
+RECOMMENDATION_MODE = True  # True = recommend only, False = live CLOB execution
+PAPER_TRADING = True        # True = paper trade with virtual bankroll, no emails
+                            # False = recommend-only (or live CLOB if RECOMMENDATION_MODE=False)
 
 # ── Bankroll ──────────────────────────────────────────────────────────────
-SHARED_BANKROLL = 3.0
+SHARED_BANKROLL = 10.0
 MIN_BET = 1.0
 MAX_BET = 1.0
+MAX_OPEN_PAPER = 1          # max concurrent paper positions
 
 # ── Entry Strategy ────────────────────────────────────────────────────────
-DISTANCE_MIN = 2.0   # minimum °C between weather.com high and bucket threshold
-DISTANCE_MAX = 4.0   # maximum °C
-NOISE_THRESHOLD = 0.5  # °C — weather.com vs METAR diff below this is noise
+DISTANCE_MIN = 2.0
+DISTANCE_MAX = 4.0
+NOISE_THRESHOLD = 0.5
 
 # ── Monitoring ────────────────────────────────────────────────────────────
-METAR_POLL_SECONDS = 45       # 45 seconds
-WEATHER_POLL_SECONDS = 600    # 10 minutes
-STOP_LOSS_PCT = -0.20         # sell at -20% of bet
-PROXIMITY_THRESHOLD = 10.0    # only trigger exit actions when METAR within this many degrees of bucket
-METAR_CLOSE_READINGS = 2      # need this many consecutive METAR readings trending toward bucket
+METAR_POLL_SECONDS = 45
+WEATHER_POLL_SECONDS = 600
+STOP_LOSS_PCT = -0.20
+PROXIMITY_THRESHOLD = 10.0
+METAR_CLOSE_READINGS = 2
+FORECAST_DRIFT_THRESHOLD = 1.0
 
 # ── Market Discovery ──────────────────────────────────────────────────────
-LOOK_AHEAD_DAYS = 2           # today + tomorrow (covers IST midnight gap)
-MIN_NO_PRICE = 0.50           # only buy NO if YES price < this (NO is cheap)
-MAX_NO_PRICE = 0.90           # skip if NO price > this (too expensive, low upside)
-MIN_VOLUME = 100              # skip low-volume markets
+LOOK_AHEAD_DAYS = 2
+MIN_NO_PRICE = 0.50
+MAX_NO_PRICE = 0.90
+MIN_VOLUME = 100
 
 # ── HTTP ──────────────────────────────────────────────────────────────────
-REQUEST_TIMEOUT = (5, 15)     # (connect, read) seconds
+REQUEST_TIMEOUT = (5, 15)
 MAX_RETRIES = 3
-RETRY_DELAY = 3               # seconds between retries
+RETRY_DELAY = 3
 
 # ── Paths ─────────────────────────────────────────────────────────────────
 BASE_DIR = pathlib.Path(__file__).parent

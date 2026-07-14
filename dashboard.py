@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Weather NO Trader Dashboard Server
-Serves the dashboard HTML and JSON API endpoints.
-Reads live state from logs/simulator_state.json and per-market log files.
+Weather NO Recommender Dashboard Server
+Serves dashboard HTML and JSON API endpoints.
+Shows buy/sell recommendations, real positions, paper trading, and monitoring events.
 """
 
 import json
@@ -11,15 +11,16 @@ import sys
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import urlparse
-from urllib.parse import parse_qs
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import LOGS_DIR
+from config import LOGS_DIR, PAPER_TRADING
 from data_sources import polymarket
 import trader
+from simulator import Simulator
 
-STATE_FILE = LOGS_DIR / "simulator_state.json"
 PORT = int(os.environ.get("PORT", os.environ.get("DASHBOARD_PORT", 8081)))
+
+sim = Simulator()
 
 
 def read_json(path):
@@ -29,154 +30,67 @@ def read_json(path):
         return None
 
 
-def get_state():
-    state = trader.load_state()
-    if state is None:
-        state = {
-            "starting_bankroll": 5.0,
-            "balance": 5.0,
-            "open_positions": {},
-            "closed_positions": [],
-        }
-    return state
-
-
 def api_balance():
-    """Get real wallet balance from CLOB."""
-    try:
-        balance = trader.get_wallet_balance()
-        return {"balance": balance, "address": os.getenv("POLY_FUNDER_ADDRESS", "")}
-    except Exception as e:
-        return {"balance": None, "error": str(e)}
-
-
-def api_summary():
-    state = get_state()
-    balance = state.get("balance", 10.0)
-    starting = state.get("starting_bankroll", 10.0)
-    open_positions = state.get("open_positions", {})
-    closed = state.get("closed_positions", [])
-
-    total = len(closed)
-    wins = sum(1 for p in closed if (p.get("pnl", 0) or 0) >= 0)
-    losses = total - wins
-    total_pnl = sum(p.get("pnl", 0) or 0 for p in closed)
-    unrealized = 0.0
-    for pos in open_positions.values():
-        unrealized += pos.get("bet_size", 0)
-
-    avg_hold = (sum(p.get("hold_time_hours", 0) or 0 for p in closed) / total) if total else 0
-
-    # Build balance history from closed trades
-    balance_history = [{"balance": starting, "ts": "", "label": "Start"}]
-    running = starting
-    for p in sorted(closed, key=lambda x: x.get("closed_at", "")):
-        pnl = p.get("pnl", 0) or 0
-        running += pnl
-        label = f"{p.get('city_slug', '')} {p.get('date', '')}"
-        balance_history.append({
-            "balance": round(running, 2),
-            "ts": p.get("closed_at", ""),
-            "label": label,
-        })
-
-    return {
-        "balance": balance,
-        "starting_bankroll": starting,
-        "total_return": round(balance - starting, 2),
-        "total_return_pct": round((balance - starting) / starting * 100, 1) if starting else 0,
-        "total_pnl": round(total_pnl, 2),
-        "wins": wins,
-        "losses": losses,
-        "win_rate": round(wins / total * 100, 1) if total else 0,
-        "positions_opened": total + len(open_positions),
-        "positions_closed": total,
-        "positions_still_open": len(open_positions),
-        "total_committed": round(unrealized, 2),
-        "avg_hold_hours": round(avg_hold, 1),
-        "balance_history": balance_history,
-        "saved_at": state.get("saved_at", ""),
-    }
+    """Wallet balance no longer available (CLOB removed)."""
+    return {"balance": None, "address": os.getenv("POLY_FUNDER_ADDRESS", "")}
 
 
 def api_positions():
-    state = get_state()
-    open_positions = state.get("open_positions", {})
-    positions = []
-
-    for key, pos in open_positions.items():
-        bucket = f"{pos.get('bucket_low', '?')}-{pos.get('bucket_high', '?')}"
-        last_events = pos.get("monitoring_events", [])[-3:]
-        last_event = last_events[-1] if last_events else None
-
-        # Fetch live NO price from Polymarket API
-        market_id = pos.get("market_id", "")
-        live_price = pos.get("current_no_price", pos.get("entry_no_price", 0))
-        if market_id:
-            try:
-                fetched = polymarket.get_market_price(market_id)
-                if fetched is not None and isinstance(fetched, dict):
-                    live_price = fetched.get("no_price", live_price)
-            except Exception:
-                pass
-
-        positions.append({
-            "key": key,
-            "city_slug": pos.get("city_slug", ""),
-            "date": pos.get("date", ""),
-            "question": pos.get("question", ""),
-            "bucket": bucket,
-            "bet_size": pos.get("bet_size", 0),
-            "entry_no_price": pos.get("entry_no_price", 0),
-            "current_no_price": live_price,
-            "shares": pos.get("shares", 0),
-            "weather_com_high": pos.get("weather_com_high"),
-            "open_meteo_high": pos.get("open_meteo_high"),
-            "distance": pos.get("distance", 0),
-            "market_id": market_id,
-            "opened_at": pos.get("opened_at", ""),
-            "last_monitored": pos.get("last_monitored", ""),
-            "last_metar_temp": pos.get("last_metar_temp"),
-            "last_wc_current": pos.get("last_wc_current"),
-            "metar_distances": pos.get("metar_distances", []),
-            "last_event": last_event,
-            "monitoring_events": last_events,
-        })
-
-    return sorted(positions, key=lambda x: x["distance"], reverse=True)
+    """Fetch real on-chain positions enriched with market labels."""
+    return trader.get_enriched_positions()
 
 
-def api_closed():
-    state = get_state()
-    closed = state.get("closed_positions", [])
-    results = []
-    for pos in closed:
-        bucket = f"{pos.get('bucket_low', '?')}-{pos.get('bucket_high', '?')}"
-        results.append({
-            "key": f"{pos.get('city_slug', '')}_{pos.get('date', '')}",
-            "city_slug": pos.get("city_slug", ""),
-            "date": pos.get("date", ""),
-            "bucket": bucket,
-            "bet_size": pos.get("bet_size", 0),
-            "entry_no_price": pos.get("entry_no_price", 0),
-            "exit_no_price": pos.get("exit_no_price"),
-            "pnl": pos.get("pnl", 0),
-            "exit_reason": pos.get("exit_reason", ""),
-            "hold_time_hours": pos.get("hold_time_hours", 0),
-            "opened_at": pos.get("opened_at", ""),
-            "closed_at": pos.get("closed_at", ""),
-            "monitoring_events": pos.get("monitoring_events", []),
-        })
-    return sorted(results, key=lambda x: x.get("closed_at", ""), reverse=True)
+def api_buy_recommendations():
+    """Get recent buy recommendations (no emails — dashboard only)."""
+    return trader.load_buy_recommendations()
+
+
+def api_sell_recommendations():
+    """Get sell recommendations with email status."""
+    return trader.load_sell_recommendations()
+
+
+def api_paper():
+    """Get paper trading state: bankroll, open positions, closed positions, summary."""
+    return {
+        "paper_trading": PAPER_TRADING,
+        "summary": sim.summary(),
+        "open_positions": sim.open_positions,
+        "closed_positions": sim.closed_positions[-20:],
+    }
+
+
+def api_summary():
+    """Machine-readable summary for cron health checks."""
+    buy_recs = trader.load_buy_recommendations()
+    sell_recs = trader.load_sell_recommendations()
+    positions = trader.get_enriched_positions()
+
+    from datetime import datetime, timezone
+    result = {
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "mode": "paper" if PAPER_TRADING else "recommendation",
+        "positions_real": len(positions),
+        "buy_recs": len(buy_recs),
+        "sell_recs": len(sell_recs),
+        "emails_sent": sum(1 for r in sell_recs if r.get("email_sent")),
+    }
+
+    if PAPER_TRADING:
+        result["paper"] = sim.summary()
+
+    return result
 
 
 def api_events():
-    """Get all monitoring events from per-market log files."""
+    """Get monitoring events."""
     events = []
     if not LOGS_DIR.exists():
         return events
     for f in sorted(LOGS_DIR.glob("*.json")):
-        if f.name == "simulator_state.json":
+        if f.name in ("simulator_state.json", "timer_state.json",
+                       "buy_recommendations.json", "sell_recommendations.json",
+                       "monitoring_state.json", "market_cache.json"):
             continue
         data = read_json(f)
         if not data or not isinstance(data, list):
@@ -187,7 +101,6 @@ def api_events():
 
 
 def api_timers():
-    """Get bot timer state for dashboard countdown timers."""
     timer_file = LOGS_DIR / "timer_state.json"
     data = read_json(timer_file)
     if data is None:
@@ -197,7 +110,6 @@ def api_timers():
 
 
 def api_regions():
-    """Return current allowed regions and IST hour for dashboard display."""
     from datetime import datetime, timezone, timedelta
     IST = timezone(timedelta(hours=5, minutes=30))
     ist_now = datetime.now(IST)
@@ -220,13 +132,14 @@ def api_regions():
 
 def api_all():
     return {
-        "summary": api_summary(),
+        "balance": api_balance(),
         "positions": api_positions(),
-        "closed": api_closed(),
+        "buy_recommendations": api_buy_recommendations(),
+        "sell_recommendations": api_sell_recommendations(),
+        "paper": api_paper(),
         "events": api_events(),
         "timers": api_timers(),
         "regions": api_regions(),
-        "balance": api_balance(),
     }
 
 
@@ -238,20 +151,24 @@ class DashboardHandler(SimpleHTTPRequestHandler):
         try:
             if path == "" or path == "/":
                 self._serve_file("dashboard.html", "text/html")
-            elif path == "/api/summary":
-                self._json_response(api_summary())
+            elif path == "/api/balance":
+                self._json_response(api_balance())
             elif path == "/api/positions":
                 self._json_response(api_positions())
-            elif path == "/api/closed":
-                self._json_response(api_closed())
+            elif path == "/api/buy-recommendations":
+                self._json_response(api_buy_recommendations())
+            elif path == "/api/sell-recommendations":
+                self._json_response(api_sell_recommendations())
+            elif path == "/api/paper":
+                self._json_response(api_paper())
+            elif path == "/api/summary":
+                self._json_response(api_summary())
             elif path == "/api/events":
                 self._json_response(api_events())
             elif path == "/api/timers":
                 self._json_response(api_timers())
             elif path == "/api/regions":
                 self._json_response(api_regions())
-            elif path == "/api/balance":
-                self._json_response(api_balance())
             elif path == "/api/all":
                 self._json_response(api_all())
             else:
@@ -263,53 +180,7 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 pass
 
     def do_POST(self):
-        parsed = urlparse(self.path)
-        path = parsed.path.rstrip("/")
-
-        try:
-            if path == "/api/sell":
-                content_length = int(self.headers.get("Content-Length", 0))
-                body = self.rfile.read(content_length)
-                data = json.loads(body) if body else {}
-                key = data.get("key", "")
-                if not key:
-                    self._json_response({"error": "missing key"}, 400)
-                    return
-
-                parts = key.split("_", 1)
-                if len(parts) != 2:
-                    self._json_response({"error": "invalid key format"}, 400)
-                    return
-
-                city_slug, date_str = parts[0], parts[1]
-                state = get_state()
-                pos = state["open_positions"].get(key)
-                if not pos:
-                    self._json_response({"error": f"no open position for {key}"}, 404)
-                    return
-
-                token_id = pos.get("token_id", "")
-                shares = pos.get("shares", 0)
-                if not token_id or shares <= 0:
-                    self._json_response({"error": "no token_id or shares"}, 400)
-                    return
-
-                # Place market sell order
-                order_resp = trader.sell_no_market(token_id, shares)
-                if order_resp:
-                    # Record exit
-                    current_no = pos.get("current_no_price", pos.get("entry_no_price", 0))
-                    trader.record_exit(state, city_slug, date_str, "manual_sell", current_no, order_resp)
-                    self._json_response({"ok": True, "order": order_resp})
-                else:
-                    self._json_response({"error": "sell order failed"}, 500)
-            else:
-                self.send_error(404)
-        except Exception as e:
-            try:
-                self.send_error(500, str(e))
-            except Exception:
-                pass
+        self.send_error(404)
 
     def _json_response(self, data, status=200):
         body = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -340,11 +211,14 @@ def main():
     server = HTTPServer(("0.0.0.0", PORT), DashboardHandler)
     print(f"  Dashboard running at http://localhost:{PORT}")
     print(f"  API endpoints:")
-    print(f"    /api/summary    - balance, P/L, win rate")
-    print(f"    /api/positions  - open positions")
-    print(f"    /api/closed     - closed trade history")
-    print(f"    /api/events     - monitoring events")
-    print(f"    /api/all        - everything combined")
+    print(f"    /api/balance              - wallet balance")
+    print(f"    /api/positions            - real on-chain positions")
+    print(f"    /api/buy-recommendations  - buy signals (no email)")
+    print(f"    /api/sell-recommendations - sell recs (emailed)")
+    print(f"    /api/paper                - paper trading state")
+    print(f"    /api/summary              - health check (for cron)")
+    print(f"    /api/events               - monitoring events")
+    print(f"    /api/all                  - everything combined")
     print(f"  Ctrl+C to stop\n")
     try:
         server.serve_forever()

@@ -15,7 +15,7 @@ from typing import Optional
 from config import (
     DISTANCE_MIN, DISTANCE_MAX, NOISE_THRESHOLD, MIN_NO_PRICE,
     MAX_NO_PRICE, MIN_VOLUME, STOP_LOSS_PCT,
-    PROXIMITY_THRESHOLD, METAR_CLOSE_READINGS,
+    PROXIMITY_THRESHOLD, METAR_CLOSE_READINGS, FORECAST_DRIFT_THRESHOLD,
 )
 from data_sources import weather_com, open_meteo, aviation_weather, polymarket
 
@@ -164,11 +164,13 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
     """
     Monitor an open position and decide action.
 
-    Strategy: Compare METAR current temp to weather.com hourly forecast.
-    If METAR is running consistently BELOW hourly forecast, the day is cooler
-    than expected and the actual high may be lower — closer to the bucket.
-    Only trigger exit actions when METAR is within PROXIMITY_THRESHOLD of
-    the bucket (not just naturally below the daily high at night/morning).
+    Strategy:
+    1. Re-fetch weather.com DAILY HIGH each cycle — if it now covers the
+       bucket, sell immediately (forecast has shifted against us).
+    2. Compare METAR current temp vs bucket: within 1°C and weather.com
+       confirms → sell immediately.
+    3. Track METAR trend for "closing in" detection.
+    4. Existing 4-case state machine for trend-based exits.
 
     Args:
         current_no_price: live NO price from Polymarket (for P/L calc).
@@ -182,13 +184,66 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
 
     temp_unit_wc = "e" if unit == "F" else "m"
 
-    # 1. Get weather.com current-hour forecast
+    # 1. Get weather.com daily high (re-fetched every cycle!)
+    wc_high = weather_com.get_daily_high(lat, lon, date_str, temp_unit_wc)
+
+    # 1b. FORECAST DRIFT CHECK — alert if daily high shifted toward the bucket
+    prev_wc_high = position.get("last_wc_high")
+    if prev_wc_high is not None and wc_high is not None and prev_wc_high != wc_high:
+        shift = wc_high - prev_wc_high
+        bucket_low = position["bucket_low"]
+        bucket_high = position["bucket_high"]
+
+        # Determine if shift moved toward the bucket (dangerous for NO)
+        toward_bucket = False
+        if bucket_high == 999:
+            # "X or higher" — higher forecast = more dangerous
+            toward_bucket = shift > 0
+        elif bucket_low == -999:
+            # "X or below" — lower forecast = more dangerous
+            toward_bucket = shift < 0
+        else:
+            # Exact bucket — shift toward bucket_mid = dangerous
+            bucket_mid = (bucket_low + bucket_high) / 2
+            old_dist = abs(prev_wc_high - bucket_mid)
+            new_dist = abs(wc_high - bucket_mid)
+            toward_bucket = new_dist < old_dist
+
+        if toward_bucket and abs(shift) >= FORECAST_DRIFT_THRESHOLD:
+            # Get current P/L
+            if current_no_price is not None and current_no_price > 0:
+                current_no = current_no_price
+            else:
+                current_no = position.get("entry_no_price", 0)
+            entry_no = position.get("entry_no_price", 0)
+            pnl_pct = ((current_no / entry_no - 1.0) * 100) if entry_no > 0 else 0
+
+            event = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "wc_high": wc_high,
+                "prev_wc_high": prev_wc_high,
+                "shift": round(shift, 1),
+                "metar_temp": None,
+                "distance_to_threshold": None,
+                "closing_in": False,
+                "running_cool": False,
+                "in_profit": pnl_pct >= 0,
+                "pnl_pct": round(pnl_pct, 1),
+                "action": "forecast_drift",
+                "reason": f"wc_high {prev_wc_high:.1f} -> {wc_high:.1f} ({shift:+.1f})",
+            }
+            _record_event(position, event, sim)
+            logger.info("[%s/%s] FORECAST DRIFT: wc_high %.1f -> %.1f (%+.1f), P/L %.1f%%",
+                        city_slug, date_str, prev_wc_high, wc_high, shift, pnl_pct)
+            return "forecast_drift"
+
+    # 2. Get weather.com current-hour forecast
     wc_current = weather_com.get_current_hour_temp(lat, lon, temp_unit_wc)
     if wc_current is None:
         logger.warning("[%s/%s] Monitoring: weather.com unavailable, holding", city_slug, date_str)
         return "hold"
 
-    # 2. Get METAR current observation
+    # 3. Get METAR current observation
     metar = aviation_weather.get_current_temp(icao)
     if metar is None:
         logger.warning("[%s/%s] Monitoring: METAR unavailable, holding", city_slug, date_str)
@@ -203,21 +258,17 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
     # Save latest readings so dashboard always has data
     position["last_metar_temp"] = metar_temp
     position["last_wc_current"] = wc_current
+    position["last_wc_high"] = wc_high
 
-    # 3. Compute diff between sources
+    # 4. Compute diff between METAR and current-hour forecast
     diff = abs(wc_current - metar_temp)
 
-    # 4. Noise check
-    if diff < NOISE_THRESHOLD:
-        logger.info("[%s/%s] Monitor: diff=%.1f %s (noise), holding",
-                    city_slug, date_str, diff, unit)
-        return "hold"
-
-    # 4b. $0.99 sell — fire regardless of proximity or trend
+    # 5. $0.99 sell — fire regardless of proximity or trend
     if current_no_price is not None and current_no_price >= 0.99:
         event = {
             "ts": datetime.now(timezone.utc).isoformat(),
             "wc_current": wc_current,
+            "wc_high": wc_high,
             "metar_temp": metar_temp,
             "metar_temp_c": metar_temp_c,
             "diff": round(diff, 2),
@@ -233,52 +284,28 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
                     city_slug, date_str, current_no_price)
         return "sell"
 
-    # 5. Calculate distance to bucket threshold
-    bucket_mid = (position["bucket_low"] + position["bucket_high"]) / 2
-    if position["bucket_low"] == -999:
-        bucket_mid = position["bucket_high"]
-    elif position["bucket_high"] == 999:
-        bucket_mid = position["bucket_low"]
+    # 6. Calculate distance to bucket threshold
+    bucket_low = position["bucket_low"]
+    bucket_high = position["bucket_high"]
+    bucket_mid = (bucket_low + bucket_high) / 2
+    if bucket_low == -999:
+        bucket_mid = bucket_high
+    elif bucket_high == 999:
+        bucket_mid = bucket_low
 
-    distance_to_threshold = abs(metar_temp - bucket_mid)
+    distance_to_threshold = abs(wc_high - bucket_mid)
 
-    # 6. PROXIMITY GATE: only trigger exits when actually near the bucket
-    # If METAR is far from the bucket, don't act regardless of anything else
-    if distance_to_threshold > PROXIMITY_THRESHOLD:
-        event = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "wc_current": wc_current,
-            "metar_temp": metar_temp,
-            "metar_temp_c": metar_temp_c,
-            "diff": round(diff, 2),
-            "distance_to_threshold": round(distance_to_threshold, 2),
-            "closing_in": False,
-            "in_profit": False,
-            "pnl_pct": 0,
-            "action": "hold",
-            "reason": "too_far_from_bucket",
-        }
-        _record_event(position, event, sim)
-        logger.info("[%s/%s] Monitor: METAR %.1f is %.1f from bucket (too far), holding",
-                    city_slug, date_str, metar_temp, distance_to_threshold)
-        return "hold"
-
-    # 7. Track METAR trend: is temp moving TOWARD the bucket over time?
-    last_metar = position.get("last_metar_temp")
+    # Track METAR trend
     prev_distances = position.get("metar_distances", [])
     prev_distances.append(round(distance_to_threshold, 2))
     if len(prev_distances) > 10:
         prev_distances = prev_distances[-10:]
     position["metar_distances"] = prev_distances
 
-    # "closing in" = last N readings show distance decreasing
     closing_in = False
     if len(prev_distances) >= METAR_CLOSE_READINGS:
         recent = prev_distances[-METAR_CLOSE_READINGS:]
         closing_in = all(recent[i] > recent[i+1] for i in range(len(recent)-1))
-
-    # 8. How much cooler/warmer than hourly forecast?
-    running_cool = metar_temp < wc_current  # actual below hourly forecast
 
     # Get current P/L
     if current_no_price is not None and current_no_price > 0:
@@ -288,10 +315,110 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
     pnl_pct = (current_no / position["entry_no_price"] - 1.0) if position["entry_no_price"] > 0 else 0
     in_profit = pnl_pct >= 0
 
-    # Log monitoring event
+    # ── IMMEDIATE SELL TRIGGERS (bypass proximity gate + trend requirement) ──
+
+    # 7. DAILY HIGH CONFLICT: weather.com daily high now covers the bucket
+    #    For a NO position, if the forecast high >= bucket threshold, we're in trouble
+    if wc_high is not None:
+        # For exact buckets (27°C): daily high >= bucket_low means it could hit
+        # For edge buckets ("35°C or higher"): daily high >= 35 means it could hit
+        # For edge buckets ("25°C or below"): daily high <= 25 means it could hit
+        daily_high_conflict = False
+        if bucket_high == 999:
+            # "X or higher" bucket — conflict if daily high >= X
+            daily_high_conflict = wc_high >= bucket_low
+        elif bucket_low == -999:
+            # "X or below" bucket — conflict if daily high <= X
+            daily_high_conflict = wc_high <= bucket_high
+        else:
+            # Exact bucket — conflict if daily high == bucket (within tolerance)
+            daily_high_conflict = abs(wc_high - bucket_mid) <= 2.0
+
+        if daily_high_conflict:
+            event = {
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "wc_current": wc_current,
+                "wc_high": wc_high,
+                "metar_temp": metar_temp,
+                "metar_temp_c": metar_temp_c,
+                "diff": round(diff, 2),
+                "distance_to_threshold": round(distance_to_threshold, 2),
+                "closing_in": False,
+                "running_cool": False,
+                "in_profit": in_profit,
+                "pnl_pct": round(pnl_pct * 100, 1),
+                "action": "sell_forecast_conflict",
+                "reason": f"daily_high={wc_high} covers bucket",
+            }
+            _record_event(position, event, sim)
+            logger.info("[%s/%s] DAILY HIGH CONFLICT: wc_high=%.1f covers bucket %.0f-%.0f, SELL",
+                        city_slug, date_str, wc_high, bucket_low, bucket_high)
+            return "sell"
+
+    # 8. METAR ALREADY AT BUCKET: actual temp hitting the bucket territory
+    #    This fires regardless of forecast — reality is already there
+    metar_at_bucket = False
+    if bucket_high == 999:
+        # "X or higher" bucket — METAR at or above X = already hitting
+        metar_at_bucket = metar_temp >= bucket_low
+    elif bucket_low == -999:
+        # "X or below" bucket — METAR at or below X = already hitting
+        metar_at_bucket = metar_temp <= bucket_high
+    else:
+        # Exact bucket — METAR at or above bucket_low = entering danger zone
+        metar_at_bucket = metar_temp >= bucket_low
+
+    if metar_at_bucket:
+        event = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "wc_current": wc_current,
+            "wc_high": wc_high,
+            "metar_temp": metar_temp,
+            "metar_temp_c": metar_temp_c,
+            "diff": round(diff, 2),
+            "distance_to_threshold": round(distance_to_threshold, 2),
+            "closing_in": closing_in,
+            "running_cool": metar_temp < wc_current,
+            "in_profit": in_profit,
+            "pnl_pct": round(pnl_pct * 100, 1),
+            "action": "sell_critical",
+            "reason": f"metar={metar_temp} at/above bucket_low={bucket_low}",
+        }
+        _record_event(position, event, sim)
+        logger.info("[%s/%s] METAR AT BUCKET: %.1f >= bucket_low %.0f, SELL",
+                    city_slug, date_str, metar_temp, bucket_low)
+        return "sell"
+
+    # 9. PROXIMITY GATE: only continue trend analysis when forecast is near the bucket
+    if distance_to_threshold > PROXIMITY_THRESHOLD:
+        event = {
+            "ts": datetime.now(timezone.utc).isoformat(),
+            "wc_current": wc_current,
+            "wc_high": wc_high,
+            "metar_temp": metar_temp,
+            "metar_temp_c": metar_temp_c,
+            "diff": round(diff, 2),
+            "distance_to_threshold": round(distance_to_threshold, 2),
+            "closing_in": False,
+            "running_cool": False,
+            "in_profit": in_profit,
+            "pnl_pct": round(pnl_pct * 100, 1),
+            "action": "hold",
+            "reason": "too_far_from_bucket",
+        }
+        _record_event(position, event, sim)
+        logger.info("[%s/%s] Monitor: wc_high %.1f is %.1f from bucket (too far), holding",
+                    city_slug, date_str, wc_high, distance_to_threshold)
+        return "hold"
+
+    # 10. How much cooler/warmer than hourly forecast?
+    running_cool = metar_temp < wc_current
+
+    # Log monitoring event (with all data)
     event = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "wc_current": wc_current,
+        "wc_high": wc_high,
         "metar_temp": metar_temp,
         "metar_temp_c": metar_temp_c,
         "diff": round(diff, 2),
@@ -303,25 +430,23 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
         "action": None,
     }
 
-    # 9. Case analysis
+    # 11. Case analysis (trend-based exits)
     if not closing_in:
-        # Case A: temp NOT trending toward threshold → HOLD
         event["action"] = "hold"
         _record_event(position, event, sim)
-        logger.info("[%s/%s] Case A: dist=%.1f not shrinking, HOLD (METAR=%.1f)",
-                    city_slug, date_str, distance_to_threshold, metar_temp)
+        logger.info("[%s/%s] Case A: dist=%.1f not shrinking, HOLD (METAR=%.1f, wc_high=%s)",
+                    city_slug, date_str, distance_to_threshold, metar_temp,
+                    f"{wc_high:.1f}" if wc_high else "N/A")
         return "hold"
 
     if not in_profit:
         if distance_to_threshold >= DISTANCE_MIN:
-            # Case C: closing in + loss + still some distance → MONITOR CLOSELY
             event["action"] = "tighten"
             _record_event(position, event, sim)
             logger.info("[%s/%s] Case C: closing in + loss + dist=%.1f, TIGHTEN",
                         city_slug, date_str, distance_to_threshold)
             return "tighten"
 
-        # Case D: closing in + loss + very close to bucket → stop loss
         if pnl_pct <= STOP_LOSS_PCT:
             event["action"] = "sell_stop_loss"
             _record_event(position, event, sim)
@@ -335,9 +460,8 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
                     city_slug, date_str, pnl_pct * 100)
         return "wait_for_stop"
 
-    # Winning, closing in, but NO < $0.99 — check proximity
+    # Winning + closing in
     if distance_to_threshold <= 1.0:
-        # Temp within 1°C of bucket — lock in profit
         event["action"] = "sell_take_profit"
         _record_event(position, event, sim)
         logger.info("[%s/%s] Case B2: closing in + dist=%.1f <= 1.0, SELL TAKE PROFIT (NO=$%.3f)",
@@ -345,7 +469,7 @@ def monitor_position(city_slug: str, station: dict, date_str: str,
         return "sell"
 
     event["action"] = "hold"
-    sim.add_monitoring_event(city_slug, date_str, event)
+    _record_event(position, event, sim)
     logger.info("[%s/%s] Monitor: closing in + dist=%.1f > 1.0, HOLD (NO=$%.3f)",
                 city_slug, date_str, distance_to_threshold, current_no)
     return "hold"

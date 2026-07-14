@@ -66,6 +66,9 @@ def get_daily_high(lat: float, lon: float, target_date: str,
     """
     Get forecast daily high for a specific date.
 
+    Uses calendarDayTemperatureMax (always populated) instead of
+    temperatureMax (which can be None for the current day).
+
     Args:
         lat, lon: coordinates
         target_date: "YYYY-MM-DD"
@@ -78,18 +81,19 @@ def get_daily_high(lat: float, lon: float, target_date: str,
     if not data:
         return None
 
-    highs = data.get("temperatureMax", [])
     times = data.get("validTimeLocal", [])
+    # calendarDayTemperatureMax is always populated; temperatureMax can be None for today
+    highs = data.get("calendarDayTemperatureMax", data.get("temperatureMax", []))
 
     for i, high in enumerate(highs):
         if i < len(times) and times[i]:
             date_str = times[i][:10]
             if date_str == target_date and high is not None:
                 unit_sym = "F" if unit == "e" else "C"
-                logger.info("TWC daily high for %s: %.1f°%s", target_date, high, unit_sym)
+                logger.info("TWC daily high for %s: %.1f°%s (from calendarDayTemperatureMax)", target_date, high, unit_sym)
                 return float(high)
 
-    logger.warning("TWC: no daily high found for %s", target_date)
+    logger.warning("TWC: no daily high found for %s (times=%s, highs=%s)", target_date, times[:3], highs[:3])
     return None
 
 

@@ -1,489 +1,501 @@
 """
-Live CLOB trading execution layer for Polymarket.
+Trading layer for Polymarket — Recommendation Mode.
 
-Uses py-clob-client-v2 to place real orders on the CLOB.
-All positions are also tracked locally in simulator_state.json
-for dashboard display and P/L tracking.
+Fetches real on-chain positions, recommends BUYs (no email),
+and recommends SELLS for positions you actually own (email sent).
 """
 
 import json
 import logging
+import smtplib
 import time
 from datetime import datetime, timezone
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 from typing import Optional
 
-from py_clob_client_v2 import (
-    ClobClient,
-    OrderArgs,
-    MarketOrderArgs,
-    OrderType,
-    Side,
-    PartialCreateOrderOptions,
-    ApiCreds,
-)
+import requests
 
 from config import (
-    POLY_PRIVATE_KEY, POLY_FUNDER_ADDRESS, POLY_SIGNATURE_TYPE,
-    POLY_CHAIN_ID, POLY_CLOB_HOST, LOGS_DIR, MIN_BET, MAX_BET,
+    POLY_FUNDER_ADDRESS, LOGS_DIR,
+    SMTP_EMAIL, SMTP_PASSWORD, SMTP_RECIPIENT,
+    SMTP_SERVER, SMTP_PORT, REQUEST_TIMEOUT, MAX_RETRIES, RETRY_DELAY,
+    PAPER_TRADING,
 )
 
 logger = logging.getLogger(__name__)
 
-_client: Optional[ClobClient] = None
-_api_creds: Optional[ApiCreds] = None
 
-
-def get_client() -> ClobClient:
-    """Get or create the authenticated CLOB client."""
-    global _client, _api_creds
-
-    if _client is not None:
-        return _client
-
-    if not POLY_PRIVATE_KEY:
-        raise ValueError("POLY_PRIVATE_KEY not set in .env")
-
-    logger.info("Initializing Polymarket CLOB client (chain=%d, sig_type=%d)",
-                POLY_CHAIN_ID, POLY_SIGNATURE_TYPE)
-
-    # Step 1: L1 auth — derive API credentials from private key
-    temp_client = ClobClient(
-        host=POLY_CLOB_HOST,
-        chain_id=POLY_CHAIN_ID,
-        key=POLY_PRIVATE_KEY,
-    )
-
-    try:
-        creds = temp_client.create_or_derive_api_key()
-        logger.info("API credentials derived successfully")
-    except Exception as e:
-        logger.error("Failed to derive API credentials: %s", e)
-        raise
-
-    # Step 2: L2 auth — fully authenticated client
-    _client = ClobClient(
-        host=POLY_CLOB_HOST,
-        chain_id=POLY_CHAIN_ID,
-        key=POLY_PRIVATE_KEY,
-        creds=creds,
-        signature_type=POLY_SIGNATURE_TYPE,
-        funder=POLY_FUNDER_ADDRESS if POLY_FUNDER_ADDRESS else None,
-    )
-    _api_creds = creds
-
-    return _client
-
-
-def buy_no_tokens(token_id: str, price: float, size: float,
-                  neg_risk: bool = False) -> Optional[dict]:
-    """
-    Place a limit buy order for NO tokens.
-
-    Args:
-        token_id: The CLOB token ID for the NO outcome
-        price: Limit price per share (what we pay)
-        size: Number of shares to buy
-        neg_risk: Whether this is a neg-risk market
-
-    Returns:
-        Order response dict or None on failure
-    """
-    client = get_client()
-
-    try:
-        tick_size = _get_tick_size(price)
-
-        order_args = OrderArgs(
-            token_id=token_id,
-            price=price,
-            side=Side.BUY,
-            size=size,
-        )
-
-        options = PartialCreateOrderOptions(
-            tick_size=tick_size,
-            neg_risk=neg_risk,
-        )
-
-        resp = client.create_and_post_order(
-            order_args=order_args,
-            options=options,
-            order_type=OrderType.GTC,
-        )
-
-        logger.info("BUY order placed: token=%s price=%.3f size=%.2f | resp=%s",
-                     token_id, price, size, resp)
-        return resp
-
-    except Exception as e:
-        logger.error("Failed to place BUY order: %s", e)
-        return None
-
-
-def buy_no_market(token_id: str, amount_usdc: float,
-                  neg_risk: bool = False) -> Optional[dict]:
-    """
-    Place a market buy order for NO tokens (FOK — fill or kill).
-
-    Args:
-        token_id: The CLOB token ID for the NO outcome
-        amount_usdc: How much USDC to spend
-        neg_risk: Whether this is a neg-risk market
-
-    Returns:
-        Order response dict or None on failure
-    """
-    client = get_client()
-
-    try:
-        order_args = MarketOrderArgs(
-            token_id=token_id,
-            amount=amount_usdc,
-            side=Side.BUY,
-            order_type=OrderType.FOK,
-        )
-
-        options = PartialCreateOrderOptions(
-            tick_size="0.01",
-            neg_risk=neg_risk,
-        )
-
-        resp = client.create_and_post_market_order(
-            order_args=order_args,
-            options=options,
-            order_type=OrderType.FOK,
-        )
-
-        logger.info("MARKET BUY: token=%s amount=$%.2f | resp=%s",
-                     token_id, amount_usdc, resp)
-        return resp
-
-    except Exception as e:
-        logger.error("Failed to place MARKET BUY: %s", e)
-        return None
-
-
-def sell_no_tokens(token_id: str, price: float, size: float,
-                   neg_risk: bool = False) -> Optional[dict]:
-    """
-    Place a limit sell order for NO tokens.
-
-    Args:
-        token_id: The CLOB token ID for the NO outcome
-        price: Limit price per share
-        size: Number of shares to sell
-        neg_risk: Whether this is a neg-risk market
-
-    Returns:
-        Order response dict or None on failure
-    """
-    client = get_client()
-
-    try:
-        tick_size = _get_tick_size(price)
-
-        order_args = OrderArgs(
-            token_id=token_id,
-            price=price,
-            side=Side.SELL,
-            size=size,
-        )
-
-        options = PartialCreateOrderOptions(
-            tick_size=tick_size,
-            neg_risk=neg_risk,
-        )
-
-        resp = client.create_and_post_order(
-            order_args=order_args,
-            options=options,
-            order_type=OrderType.GTC,
-        )
-
-        logger.info("SELL order placed: token=%s price=%.3f size=%.2f | resp=%s",
-                     token_id, price, size, resp)
-        return resp
-
-    except Exception as e:
-        logger.error("Failed to place SELL order: %s", e)
-        return None
-
-
-def sell_no_market(token_id: str, size: float,
-                   neg_risk: bool = False) -> Optional[dict]:
-    """
-    Place a market sell order for NO tokens (FOK — fill or kill).
-
-    Args:
-        token_id: The CLOB token ID for the NO outcome
-        size: Number of shares to sell
-        neg_risk: Whether this is a neg-risk market
-
-    Returns:
-        Order response dict or None on failure
-    """
-    client = get_client()
-
-    try:
-        order_args = MarketOrderArgs(
-            token_id=token_id,
-            amount=size,
-            side=Side.SELL,
-            order_type=OrderType.FOK,
-        )
-
-        options = PartialCreateOrderOptions(
-            tick_size="0.01",
-            neg_risk=neg_risk,
-        )
-
-        resp = client.create_and_post_market_order(
-            order_args=order_args,
-            options=options,
-            order_type=OrderType.FOK,
-        )
-
-        logger.info("MARKET SELL: token=%s size=%.2f | resp=%s",
-                     token_id, size, resp)
-        return resp
-
-    except Exception as e:
-        logger.error("Failed to place MARKET SELL: %s", e)
-        return None
-
-
-def cancel_order(order_id: str) -> Optional[dict]:
-    """Cancel a specific order by ID."""
-    client = get_client()
-    try:
-        resp = client.cancel(order_id)
-        logger.info("Cancelled order %s: %s", order_id, resp)
-        return resp
-    except Exception as e:
-        logger.error("Failed to cancel order %s: %s", order_id, e)
-        return None
-
-
-def cancel_all_orders() -> Optional[dict]:
-    """Cancel all open orders."""
-    client = get_client()
-    try:
-        resp = client.cancel_all()
-        logger.info("Cancelled all orders: %s", resp)
-        return resp
-    except Exception as e:
-        logger.error("Failed to cancel all orders: %s", e)
-        return None
-
-
-def get_open_orders() -> list[dict]:
-    """Fetch all open orders from the CLOB."""
-    client = get_client()
-    try:
-        resp = client.get_open_orders()
-        if isinstance(resp, list):
-            return resp
-        return resp.get("data", []) if isinstance(resp, dict) else []
-    except Exception as e:
-        logger.error("Failed to get open orders: %s", e)
-        return []
-
-
-def get_order_book(token_id: str) -> Optional[dict]:
-    """Fetch the order book for a token."""
-    client = get_client()
-    try:
-        return client.get_order_book(token_id)
-    except Exception as e:
-        logger.error("Failed to get order book for %s: %s", token_id, e)
-        return None
-
-
-def get_midpoint(token_id: str) -> Optional[float]:
-    """Get the midpoint price for a token."""
-    client = get_client()
-    try:
-        resp = client.get_midpoint(token_id)
-        return float(resp) if resp else None
-    except Exception as e:
-        logger.error("Failed to get midpoint for %s: %s", token_id, e)
-        return None
-
-
-def get_price(token_id: str, side: str = "BUY") -> Optional[float]:
-    """Get the best price for a token on a given side."""
-    client = get_client()
-    try:
-        resp = client.get_price(token_id, side=side)
-        return float(resp) if resp else None
-    except Exception as e:
-        logger.error("Failed to get price for %s: %s", token_id, e)
-        return None
-
-
-def get_wallet_balance() -> Optional[float]:
-    """
-    Get the USDC/pUSD balance for the funder wallet.
-    Returns balance in USD or None on failure.
-    """
-    client = get_client()
-    try:
-        from py_clob_client_v2.clob_types import BalanceAllowanceParams
-        params = BalanceAllowanceParams(asset_type="COLLATERAL")
-        resp = client.get_balance_allowance(params)
-        if isinstance(resp, dict):
-            raw_balance = resp.get("balance", "0")
-            return float(raw_balance) / 1_000_000
-        return None
-    except Exception as e:
-        logger.error("Failed to get wallet balance: %s", e)
-        return None
-
+# ── Real Position Fetching ───────────────────────────────────────────────
 
 def get_positions() -> list[dict]:
-    """Fetch current positions from the Data API."""
-    try:
-        import httpx
-        resp = httpx.get(
-            f"https://data-api.polymarket.com/positions",
-            params={"user": POLY_FUNDER_ADDRESS},
-            timeout=10,
-        )
-        resp.raise_for_status()
-        return resp.json()
-    except Exception as e:
-        logger.error("Failed to get positions: %s", e)
+    """Fetch current positions from the Polymarket Data API."""
+    if not POLY_FUNDER_ADDRESS:
         return []
+    for attempt in range(1, MAX_RETRIES + 1):
+        try:
+            resp = requests.get(
+                "https://data-api.polymarket.com/positions",
+                params={"user": POLY_FUNDER_ADDRESS},
+                timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception as e:
+            logger.error("Failed to get positions (attempt %d/%d): %s", attempt, MAX_RETRIES, e)
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY)
+    return []
 
 
-def _get_tick_size(price: float) -> str:
-    """Determine tick size based on price level."""
-    if price < 0.10:
-        return "0.001"
-    elif price < 0.50:
-        return "0.01"
-    else:
-        return "0.01"
+def match_positions_to_markets(positions: list[dict], weather_markets: list[dict]) -> list[dict]:
+    """
+    Match real on-chain positions to discovered weather markets.
+
+    Returns list of enriched position dicts ready for monitoring.
+    Each contains the real position data + weather market metadata.
+    """
+    # Build lookup: token_id -> market metadata
+    token_lookup = {}
+    for wm in weather_markets:
+        for bucket in wm.get("buckets", []):
+            tid = bucket.get("token_id", "")
+            if tid:
+                token_lookup[tid] = {
+                    "city_slug": wm["city_slug"],
+                    "date_str": wm["date_str"],
+                    "station": wm["station"],
+                    "market_id": bucket["market_id"],
+                    "question": bucket["question"],
+                    "bucket_low": bucket["range"][0],
+                    "bucket_high": bucket["range"][1],
+                    "neg_risk": bucket.get("neg_risk", False),
+                }
+
+    matched = []
+    for pos in positions:
+        token_id = pos.get("asset", pos.get("tokenId", ""))
+        outcome = pos.get("outcome", "")
+        size = float(pos.get("size", 0))
+
+        if not token_id or size <= 0:
+            continue
+
+        # We only care about NO positions
+        if outcome.lower() != "no":
+            continue
+
+        meta = token_lookup.get(token_id)
+        if not meta:
+            continue
+
+        avg_price = float(pos.get("avgPrice", pos.get("averagePrice", 0)) or 0)
+        current_val = float(pos.get("currentValue", 0) or 0)
+        last_price = float(pos.get("lastTradedPrice", 0) or 0)
+
+        # Compute entry NO price from average price if available
+        entry_no = avg_price if avg_price > 0 else (1.0 - last_price if last_price > 0 else 0.5)
+
+        matched.append({
+            **meta,
+            "token_id": token_id,
+            "size": size,
+            "entry_no_price": entry_no,
+            "current_value": current_val,
+            "last_price": last_price,
+            "bet_size": round(size * entry_no, 2),
+            "raw": pos,
+        })
+
+    return matched
 
 
-# ── Local Position Tracking ──────────────────────────────────────────────
+# ── Monitoring State Cache ────────────────────────────────────────────────
 
-def _state_path() -> Path:
-    return LOGS_DIR / "simulator_state.json"
+def _monitoring_path() -> Path:
+    return LOGS_DIR / "monitoring_state.json"
 
 
-def load_state() -> dict:
-    """Load local position tracking state."""
-    path = _state_path()
+def load_monitoring_state() -> dict:
+    path = _monitoring_path()
     if path.exists():
         try:
             return json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, KeyError):
+        except (json.JSONDecodeError, FileNotFoundError):
             pass
-    return {
-        "starting_bankroll": 3.0,
-        "balance": 3.0,
-        "open_positions": {},
-        "closed_positions": [],
-    }
+    return {}
 
 
-def save_state(state: dict):
-    """Save local position tracking state."""
+def save_monitoring_state(state: dict):
     LOGS_DIR.mkdir(parents=True, exist_ok=True)
-    state["saved_at"] = datetime.now(timezone.utc).isoformat()
-    _state_path().write_text(
+    _monitoring_path().write_text(
         json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8"
     )
 
 
-def record_entry(state: dict, city_slug: str, date_str: str,
-                 bet_size: float, entry_no_price: float, market_id: str,
-                 token_id: str, question: str, bucket_range: tuple,
-                 weather_com_high: float, open_meteo_high: Optional[float],
-                 distance: float, order_resp: dict) -> dict:
-    """Record a new position in local state after a live order is placed."""
-    key = f"{city_slug}_{date_str}"
+# ── Email (Sells Only) ──────────────────────────────────────────────────
 
-    if key in state["open_positions"]:
-        logger.warning("Already tracking position for %s", key)
-        return state["open_positions"][key]
+def send_email(subject: str, html_body: str) -> bool:
+    try:
+        msg = MIMEMultipart("alternative")
+        msg["Subject"] = subject
+        msg["From"] = SMTP_EMAIL
+        msg["To"] = SMTP_RECIPIENT
+        msg.attach(MIMEText(f"Recommendation: {subject}", "plain"))
+        msg.attach(MIMEText(html_body, "html"))
 
-    # Deduct from balance
-    state["balance"] = round(state["balance"] - bet_size, 2)
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.ehlo()
+            server.login(SMTP_EMAIL, SMTP_PASSWORD)
+            server.sendmail(SMTP_EMAIL, SMTP_RECIPIENT, msg.as_string())
 
-    position = {
-        "city_slug": city_slug,
-        "date": date_str,
-        "market_id": market_id,
-        "token_id": token_id,
-        "question": question,
-        "bucket_low": bucket_range[0],
-        "bucket_high": bucket_range[1],
-        "bet_size": round(bet_size, 2),
-        "entry_no_price": entry_no_price,
-        "entry_yes_price": round(1 - entry_no_price, 4),
-        "shares": round(bet_size / entry_no_price, 2) if entry_no_price > 0 else 0,
-        "weather_com_high": weather_com_high,
-        "open_meteo_high": open_meteo_high,
-        "distance": round(distance, 2),
-        "opened_at": datetime.now(timezone.utc).isoformat(),
-        "order_id": order_resp.get("orderID", order_resp.get("id", "")),
-        "monitoring_events": [],
-    }
-
-    state["open_positions"][key] = position
-    save_state(state)
-
-    logger.info("RECORDED ENTRY %s: $%.2f NO @ $%.3f | order_id=%s",
-                key, bet_size, entry_no_price, position["order_id"])
-    return position
+        logger.info("Email sent: %s", subject)
+        return True
+    except Exception as e:
+        logger.error("Failed to send email: %s", e)
+        return False
 
 
-def record_exit(state: dict, city_slug: str, date_str: str,
-                exit_reason: str, current_no_price: Optional[float] = None,
-                order_resp: Optional[dict] = None) -> Optional[dict]:
-    """Record a position exit in local state after a live sell order."""
-    key = f"{city_slug}_{date_str}"
-    pos = state["open_positions"].pop(key, None)
-    if not pos:
-        return None
+def notify_sell(position: dict, reason: str, current_no_price: Optional[float] = None) -> bool:
+    """Send a SELL recommendation email for a real position."""
+    city = position.get("city_slug", "?").upper()
+    date = position.get("date", "?")
+    bucket_low = position.get("bucket_low", 0)
+    bucket_high = position.get("bucket_high", 0)
+    entry_no = position.get("entry_no_price", 0)
+    bet_size = position.get("bet_size", 0)
+    question = position.get("question", "")
+    size = position.get("size", 0)
 
-    bet = pos["bet_size"]
-    entry_no = pos["entry_no_price"]
-
-    if exit_reason == "resolution_win":
-        pnl = round(bet * (1.0 / entry_no - 1.0), 2)
-        proceeds = round(bet + pnl, 2)
-    elif exit_reason == "resolution_loss":
-        pnl = -bet
-        proceeds = 0.0
-    elif current_no_price is not None and current_no_price > 0:
-        pnl = round(bet * (current_no_price / entry_no - 1.0), 2)
-        proceeds = round(bet + pnl, 2)
-        proceeds = max(proceeds, 0.0)
+    exit_price = current_no_price if current_no_price else entry_no
+    if entry_no > 0 and exit_price > 0:
+        pnl_pct = (exit_price / entry_no - 1.0) * 100
+        pnl_dollar = bet_size * (exit_price / entry_no - 1.0)
     else:
-        pnl = 0.0
-        proceeds = bet
+        pnl_pct = 0
+        pnl_dollar = 0
 
-    state["balance"] = round(state["balance"] + proceeds, 2)
+    pnl_color = "#22c55e" if pnl_dollar >= 0 else "#ef4444"
+    result = "WIN" if pnl_dollar >= 0 else "LOSS"
 
-    pos["exit_reason"] = exit_reason
-    pos["exit_no_price"] = current_no_price
-    pos["pnl"] = pnl
-    pos["proceeds"] = proceeds
-    pos["closed_at"] = datetime.now(timezone.utc).isoformat()
-    pos["hold_time_hours"] = round(
-        (datetime.fromisoformat(pos["closed_at"]) -
-         datetime.fromisoformat(pos["opened_at"])).total_seconds() / 3600, 1
+    reason_labels = {
+        "monitor_sell": "Monitor Signal",
+        "resolution_win": "Resolved YES (Win)",
+        "resolution_loss": "Resolved NO (Loss)",
+        "manual_sell": "Manual Recommendation",
+        "forecast_conflict": "Forecast High Covers Bucket",
+        "critical_close": "METAR Critically Close to Bucket",
+    }
+    reason_label = reason_labels.get(reason, reason)
+
+    subject = f"SELL: {city} {bucket_low}-{bucket_high} ({result} {pnl_dollar:+.2f})"
+
+    html = f"""
+    <html>
+    <head>
+    <style>
+        body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #0a0e17; color: #e2e8f0; padding: 20px; }}
+        .card {{ background: #111827; border: 1px solid #1e2d45; border-radius: 12px; padding: 24px; max-width: 600px; }}
+        .header {{ border-bottom: 2px solid {"#22c55e" if pnl_dollar >= 0 else "#ef4444"}; padding-bottom: 12px; margin-bottom: 16px; }}
+        h1 {{ color: {"#22c55e" if pnl_dollar >= 0 else "#ef4444"}; font-size: 18px; margin: 0; }}
+        .tag {{ display: inline-block; background: rgba({"34,197,94" if pnl_dollar >= 0 else "239,68,68"},0.15); color: {"#22c55e" if pnl_dollar >= 0 else "#ef4444"}; padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: 700; }}
+        .row {{ display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #1e2d45; font-size: 14px; }}
+        .row:last-child {{ border-bottom: none; }}
+        .label {{ color: #64748b; }}
+        .value {{ font-weight: 600; font-family: 'Consolas', monospace; }}
+        .footer {{ margin-top: 16px; padding-top: 12px; border-top: 1px solid #1e2d45; color: #64748b; font-size: 12px; }}
+    </style>
+    </head>
+    <body>
+    <div class="card">
+        <div class="header">
+            <h1>SELL Recommendation <span class="tag">{result}</span></h1>
+        </div>
+        <div class="row"><span class="label">City</span><span class="value">{city}</span></div>
+        <div class="row"><span class="label">Date</span><span class="value">{date}</span></div>
+        <div class="row"><span class="label">Bucket</span><span class="value">{bucket_low} - {bucket_high}</span></div>
+        <div class="row"><span class="label">Shares</span><span class="value">{size:.2f}</span></div>
+        <div class="row"><span class="label">Entry NO</span><span class="value">${entry_no:.3f}</span></div>
+        <div class="row"><span class="label">Current NO</span><span class="value">${exit_price:.3f}</span></div>
+        <div class="row"><span class="label">P/L</span><span class="value" style="color:{pnl_color}">{pnl_dollar:+.2f} ({pnl_pct:+.1f}%)</span></div>
+        <div class="row"><span class="label">Reason</span><span class="value">{reason_label}</span></div>
+        <div class="footer">
+            Weather NO Recommender &bull; {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}
+        </div>
+    </div>
+    </body>
+    </html>
+    """
+
+    ok = True
+    if PAPER_TRADING:
+        logger.info("[PAPER] Sell email suppressed: %s", subject)
+    else:
+        ok = send_email(subject, html)
+    _log_sell_recommendation(position, reason, current_no_price, pnl_dollar, ok)
+    return ok
+
+
+def notify_forecast_drift(position: dict, old_high: float, new_high: float,
+                           current_no_price: Optional[float] = None) -> bool:
+    """Send a FORECAST DRIFT alert email (informational, not a sell rec)."""
+    city = position.get("city_slug", "?").upper()
+    date = position.get("date", "?")
+    bucket_low = position.get("bucket_low", 0)
+    bucket_high = position.get("bucket_high", 0)
+    entry_no = position.get("entry_no_price", 0)
+    bet_size = position.get("bet_size", 0)
+
+    shift = new_high - old_high
+
+    if current_no_price is not None and current_no_price > 0:
+        current_no = current_no_price
+    else:
+        current_no = entry_no
+    if entry_no > 0 and current_no > 0:
+        pnl_pct = (current_no / entry_no - 1.0) * 100
+        pnl_dollar = bet_size * (current_no / entry_no - 1.0)
+    else:
+        pnl_pct = 0
+        pnl_dollar = 0
+
+    pnl_color = "#22c55e" if pnl_dollar >= 0 else "#ef4444"
+    result = "PROFIT" if pnl_dollar >= 0 else "LOSS"
+
+    subject = f"FORECAST SHIFT: {city} {bucket_low}-{bucket_high} ({shift:+.1f}C) [{result} {pnl_dollar:+.2f}]"
+
+    html = f"""
+    <html>
+    <head>
+    <style>
+        body {{ font-family: 'Segoe UI', Arial, sans-serif; background: #0a0e17; color: #e2e8f0; padding: 20px; }}
+        .card {{ background: #111827; border: 1px solid #1e2d45; border-radius: 12px; padding: 24px; max-width: 600px; }}
+        .header {{ border-bottom: 2px solid #f59e0b; padding-bottom: 12px; margin-bottom: 16px; }}
+        h1 {{ color: #f59e0b; font-size: 18px; margin: 0; }}
+        .tag {{ display: inline-block; background: rgba(245,158,11,0.15); color: #f59e0b; padding: 3px 10px; border-radius: 4px; font-size: 12px; font-weight: 700; }}
+        .row {{ display: flex; justify-content: space-between; padding: 8px 0; border-bottom: 1px solid #1e2d45; font-size: 14px; }}
+        .row:last-child {{ border-bottom: none; }}
+        .label {{ color: #64748b; }}
+        .value {{ font-weight: 600; font-family: 'Consolas', monospace; }}
+        .footer {{ margin-top: 16px; padding-top: 12px; border-top: 1px solid #1e2d45; color: #64748b; font-size: 12px; }}
+    </style>
+    </head>
+    <body>
+    <div class="card">
+        <div class="header">
+            <h1>Forecast Drift Alert <span class="tag">SHIFT</span></h1>
+        </div>
+        <div class="row"><span class="label">City</span><span class="value">{city}</span></div>
+        <div class="row"><span class="label">Date</span><span class="value">{date}</span></div>
+        <div class="row"><span class="label">Bucket</span><span class="value">{bucket_low} - {bucket_high}</span></div>
+        <div class="row"><span class="label">Old Forecast High</span><span class="value">{old_high:.1f}C</span></div>
+        <div class="row"><span class="label">New Forecast High</span><span class="value">{new_high:.1f}C</span></div>
+        <div class="row"><span class="label">Shift</span><span class="value" style="color:#f59e0b">{shift:+.1f}C</span></div>
+        <div class="row"><span class="label">Entry NO</span><span class="value">${entry_no:.3f}</span></div>
+        <div class="row"><span class="label">Current NO</span><span class="value">${current_no:.3f}</span></div>
+        <div class="row"><span class="label">P/L</span><span class="value" style="color:{pnl_color}">{pnl_dollar:+.2f} ({pnl_pct:+.1f}%)</span></div>
+        <div class="footer">
+            Weather NO Recommender &bull; {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}
+        </div>
+    </div>
+    </body>
+    </html>
+    """
+
+    ok = True
+    if PAPER_TRADING:
+        logger.info("[PAPER] Forecast drift email suppressed: %s", subject)
+    else:
+        ok = send_email(subject, html)
+    logger.info("Forecast drift email sent: %s %s (%.1f -> %.1f)", city, date, old_high, new_high)
+    _log_sell_recommendation(position, "forecast_drift", current_no_price, pnl_dollar, ok)
+    return ok
+
+def _log_sell_recommendation(position: dict, reason: str, current_no_price: Optional[float],
+                             pnl: float, email_sent: bool):
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOGS_DIR / "sell_recommendations.json"
+
+    recs = []
+    if log_path.exists():
+        try:
+            recs = json.loads(log_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, FileNotFoundError):
+            recs = []
+
+    recs.append({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "email_sent": email_sent,
+        "city_slug": position.get("city_slug", ""),
+        "date": position.get("date", ""),
+        "bucket_low": position.get("bucket_low", 0),
+        "bucket_high": position.get("bucket_high", 0),
+        "entry_no_price": position.get("entry_no_price", 0),
+        "current_no_price": current_no_price,
+        "bet_size": position.get("bet_size", 0),
+        "size": position.get("size", 0),
+        "reason": reason,
+        "pnl": pnl,
+    })
+
+    if len(recs) > 200:
+        recs = recs[-200:]
+
+    log_path.write_text(json.dumps(recs, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def _log_buy_recommendation(signal: dict):
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = LOGS_DIR / "buy_recommendations.json"
+
+    recs = []
+    if log_path.exists():
+        try:
+            recs = json.loads(log_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, FileNotFoundError):
+            recs = []
+
+    recs.append({
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "city_slug": signal.get("city_slug", ""),
+        "date": signal.get("date", ""),
+        "bucket_low": signal.get("bucket_range", (0, 0))[0],
+        "bucket_high": signal.get("bucket_range", (0, 0))[1],
+        "no_price": signal.get("no_price", 0),
+        "yes_price": signal.get("yes_price", 0),
+        "bet_size": signal.get("bet_size", 1.0),
+        "wc_high": signal.get("wc_high"),
+        "om_high": signal.get("om_high"),
+        "distance": signal.get("distance", 0),
+        "question": signal.get("question", ""),
+    })
+
+    if len(recs) > 200:
+        recs = recs[-200:]
+
+    log_path.write_text(json.dumps(recs, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def load_buy_recommendations() -> list[dict]:
+    log_path = LOGS_DIR / "buy_recommendations.json"
+    if log_path.exists():
+        try:
+            return json.loads(log_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, FileNotFoundError):
+            pass
+    return []
+
+
+def load_sell_recommendations() -> list[dict]:
+    log_path = LOGS_DIR / "sell_recommendations.json"
+    if log_path.exists():
+        try:
+            return json.loads(log_path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, FileNotFoundError):
+            pass
+    return []
+
+
+# ── Market Cache (token_id -> city/date/bucket mapping) ──────────────────
+
+def _market_cache_path() -> Path:
+    return LOGS_DIR / "market_cache.json"
+
+
+def save_market_cache(weather_markets: list[dict]):
+    """Save token_id -> market metadata mapping for dashboard use."""
+    cache = load_market_cache()
+    for wm in weather_markets:
+        for bucket in wm.get("buckets", []):
+            tid = bucket.get("token_id", "")
+            if tid:
+                cache[tid] = {
+                    "city_slug": wm["city_slug"],
+                    "date_str": wm["date_str"],
+                    "market_id": bucket["market_id"],
+                    "question": bucket["question"],
+                    "bucket_low": bucket["range"][0],
+                    "bucket_high": bucket["range"][1],
+                }
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    _market_cache_path().write_text(
+        json.dumps(cache, indent=2, ensure_ascii=False), encoding="utf-8"
     )
-    if order_resp:
-        pos["exit_order_id"] = order_resp.get("orderID", order_resp.get("id", ""))
 
-    state["closed_positions"].append(pos)
-    save_state(state)
 
-    logger.info("RECORDED EXIT %s: %s | P/L: $%.2f | balance: $%.2f",
-                key, exit_reason, pnl, state["balance"])
-    return pos
+def load_market_cache() -> dict:
+    """Load token_id -> market metadata cache."""
+    path = _market_cache_path()
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, FileNotFoundError):
+            pass
+    return {}
+
+
+def get_enriched_positions() -> list[dict]:
+    """
+    Fetch real positions and enrich with market metadata from cache.
+    Returns positions labeled with city/date/bucket.
+    """
+    positions = get_positions()
+    cache = load_market_cache()
+
+    enriched = []
+    for pos in positions:
+        token_id = pos.get("asset", pos.get("tokenId", ""))
+        outcome = pos.get("outcome", "")
+        size = float(pos.get("size", 0) or 0)
+
+        if size <= 0:
+            continue
+
+        avg_price = float(pos.get("avgPrice", pos.get("averagePrice", 0)) or 0)
+        current_val = float(pos.get("currentValue", 0) or 0)
+        last_price = float(pos.get("lastTradedPrice", 0) or 0)
+        cost_basis = size * avg_price
+
+        meta = cache.get(token_id, {})
+        city_slug = meta.get("city_slug", "")
+        date_str = meta.get("date_str", "")
+        bucket_low = meta.get("bucket_low", 0)
+        bucket_high = meta.get("bucket_high", 0)
+
+        if city_slug:
+            label = f"{city_slug.upper()} {date_str} ({bucket_low}-{bucket_high})"
+        elif outcome.lower() == "no":
+            label = f"NO {token_id[:12]}..."
+        else:
+            label = f"{outcome} {token_id[:12]}..."
+
+        pnl = current_val - cost_basis if cost_basis > 0 else 0
+        pnl_pct = (last_price / avg_price - 1.0) * 100 if avg_price > 0 and last_price > 0 else 0
+
+        enriched.append({
+            "token_id": token_id,
+            "outcome": outcome,
+            "label": label,
+            "city_slug": city_slug,
+            "date_str": date_str,
+            "bucket_low": bucket_low,
+            "bucket_high": bucket_high,
+            "market_id": meta.get("market_id", ""),
+            "question": meta.get("question", ""),
+            "size": size,
+            "avg_price": avg_price,
+            "last_price": last_price,
+            "current_value": current_val,
+            "cost_basis": round(cost_basis, 4),
+            "pnl": round(pnl, 4),
+            "pnl_pct": round(pnl_pct, 1),
+            "condition_id": pos.get("conditionId", pos.get("condition_id", "")),
+        })
+
+    # Sort: weather-labeled first, then by P/L
+    enriched.sort(key=lambda p: (not bool(p["city_slug"]), -p["pnl"]))
+    return enriched
