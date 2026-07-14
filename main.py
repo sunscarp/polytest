@@ -150,29 +150,31 @@ def scan_entries(stations: dict, markets: list[dict]) -> int:
                      signal["city_slug"], signal["date"],
                      signal["bet_size"], signal["no_price"], signal["distance"])
 
-    # Paper trading: auto-buy the best signal if we have room
-    if PAPER_TRADING and sim.open_count() < MAX_OPEN_PAPER:
-        best = all_signals[0]
-        city_slug = best["city_slug"]
-        date_str = best["date"]
+    # Paper trading: auto-buy signals until we hit the limit
+    if PAPER_TRADING:
+        for signal in all_signals:
+            if sim.open_count() >= MAX_OPEN_PAPER:
+                break
+            city_slug = signal["city_slug"]
+            date_str = signal["date"]
 
-        if not sim.has_position(city_slug, date_str):
-            pos = sim.open_position(
-                city_slug=city_slug,
-                date_str=date_str,
-                bet_size=best["bet_size"],
-                entry_no_price=best["no_price"],
-                market_id=best["market_id"],
-                question=best["question"],
-                bucket_range=best["bucket_range"],
-                weather_com_high=best["wc_high"],
-                open_meteo_high=best.get("om_high"),
-                distance=best["distance"],
-            )
-            if pos:
-                logger.info("[PAPER] OPENED: %s/%s $%.2f NO @ $%.3f (dist=%.1f, wc_high=%.1f)",
-                            city_slug, date_str, best["bet_size"], best["no_price"],
-                            best["distance"], best["wc_high"])
+            if not sim.has_position(city_slug, date_str):
+                pos = sim.open_position(
+                    city_slug=city_slug,
+                    date_str=date_str,
+                    bet_size=signal["bet_size"],
+                    entry_no_price=signal["no_price"],
+                    market_id=signal["market_id"],
+                    question=signal["question"],
+                    bucket_range=signal["bucket_range"],
+                    weather_com_high=signal["wc_high"],
+                    open_meteo_high=signal.get("om_high"),
+                    distance=signal["distance"],
+                )
+                if pos:
+                    logger.info("[PAPER] OPENED: %s/%s $%.2f NO @ $%.3f (dist=%.1f, wc_high=%.1f)",
+                                city_slug, date_str, signal["bet_size"], signal["no_price"],
+                                signal["distance"], signal["wc_high"])
 
     return len(all_signals)
 
