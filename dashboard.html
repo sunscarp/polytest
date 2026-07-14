@@ -146,6 +146,7 @@
   <div class="header">
     <h1>WEATHER <span class="no-tag">NO</span> SIMULATOR</h1>
     <div class="header-right">
+      <div class="timer-badge" id="regionBadge" style="color:var(--yellow);"><span class="dot" style="background:var(--yellow);"></span><span id="regionText">--</span></div>
       <div class="timer-badge"><span class="dot metar" id="metarDot"></span>METAR <span id="metarCountdown">--</span></div>
       <div class="timer-badge"><span class="dot scan" id="scanDot"></span>Scan <span id="scanCountdown">--</span></div>
       <span><span class="status-dot" id="statusDot"></span><span id="statusText">Connected</span></span>
@@ -482,6 +483,11 @@ async function refresh() {
     if (data.timers) {
       botTimers = data.timers;
       updateCountdowns();
+    }
+
+    // Regions
+    if (data.regions) {
+      $('regionText').textContent = data.regions.ist_hour + ' IST — ' + data.regions.window;
     }
 
     // Status

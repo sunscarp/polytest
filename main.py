@@ -51,19 +51,44 @@ def load_stations() -> dict:
 
 # ── Market Discovery ──────────────────────────────────────────────────────
 
+def get_allowed_regions() -> set:
+    """
+    Return set of allowed region strings based on current IST hour.
+    12 AM – 8 AM IST  → Asia only
+    8 AM – 3 PM IST   → Asia + Europe + Africa
+    3 PM – 12 AM IST  → All regions
+    """
+    IST = timezone(timedelta(hours=5, minutes=30))
+    hour = datetime.now(IST).hour
+    if hour < 8:
+        return {"asia"}
+    elif hour < 15:
+        return {"asia", "europe", "africa"}
+    else:
+        return {"asia", "europe", "africa", "americas"}
+
+
 def discover_markets(stations: dict, skip_cities: set = None) -> list[dict]:
     """
     Find all available Polymarket temperature markets for the next N days.
     Returns list of {city_slug, station, date_str, event_slug} dicts.
     Cities in skip_cities are not queried (no data available).
+    Filters cities by region based on IST time window.
     """
     now = datetime.now(timezone.utc)
     markets = []
     if skip_cities is None:
         skip_cities = set()
 
+    allowed_regions = get_allowed_regions()
+    logger.info("Time-based filter — allowed regions: %s", allowed_regions)
+
     for city_slug, station in stations.items():
         if city_slug in skip_cities:
+            continue
+
+        region = station.get("region", "asia")
+        if region not in allowed_regions:
             continue
 
         for day_offset in range(LOOK_AHEAD_DAYS):
@@ -279,7 +304,7 @@ def cmd_run():
                     skip_cities = set()
                     current_date = today
 
-                print(f"[{now_str}] full scan... ({len(skip_cities)} cities skipped)")
+                print(f"[{now_str}] full scan... ({len(skip_cities)} cities skipped, regions: {get_allowed_regions()})")
                 markets = discover_markets(stations, skip_cities)
                 opened = scan_entries(stations, markets, sim)
                 last_full_scan = time.time()

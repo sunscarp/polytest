@@ -185,6 +185,28 @@ def api_timers():
     return data
 
 
+def api_regions():
+    """Return current allowed regions and IST hour for dashboard display."""
+    from datetime import datetime, timezone, timedelta
+    IST = timezone(timedelta(hours=5, minutes=30))
+    ist_now = datetime.now(IST)
+    hour = ist_now.hour
+    if hour < 8:
+        allowed = {"asia"}
+        window = "Asia Only"
+    elif hour < 15:
+        allowed = {"asia", "europe", "africa"}
+        window = "Asia + Europe + Africa"
+    else:
+        allowed = {"asia", "europe", "africa", "americas"}
+        window = "All Regions"
+    return {
+        "ist_hour": ist_now.strftime("%H:%M"),
+        "window": window,
+        "allowed_regions": sorted(allowed),
+    }
+
+
 def api_all():
     return {
         "summary": api_summary(),
@@ -192,6 +214,7 @@ def api_all():
         "closed": api_closed(),
         "events": api_events(),
         "timers": api_timers(),
+        "regions": api_regions(),
     }
 
 
@@ -213,6 +236,8 @@ class DashboardHandler(SimpleHTTPRequestHandler):
                 self._json_response(api_events())
             elif path == "/api/timers":
                 self._json_response(api_timers())
+            elif path == "/api/regions":
+                self._json_response(api_regions())
             elif path == "/api/all":
                 self._json_response(api_all())
             else:
