@@ -24,7 +24,8 @@ _CACHE_TTL = 600  # 10 minutes — forecast data doesn't change that fast
 
 # ── Throttle (spread requests across time to avoid 429s) ─────────────────
 _last_request_ts: float = 0.0
-_MIN_GAP = 1.5  # seconds between consecutive Open-Meteo requests
+_MIN_GAP = 2.5  # seconds between consecutive Open-Meteo requests
+_cooldown_until: float = 0.0  # global cooldown after 429
 
 
 def _cache_key(lat: float, lon: float, target_date: str, unit: str,
@@ -48,7 +49,10 @@ def _throttle():
     """Enforce minimum gap between consecutive requests."""
     global _last_request_ts
     now = time.time()
-    wait = _MIN_GAP - (now - _last_request_ts)
+    # Respect global cooldown after 429
+    if _cooldown_until > now:
+        time.sleep(_cooldown_until - now)
+    wait = _MIN_GAP - (time.time() - _last_request_ts)
     if wait > 0:
         time.sleep(wait)
     _last_request_ts = time.time()
@@ -87,6 +91,9 @@ def get_daily_high(lat: float, lon: float, target_date: str,
             # Handle rate limiting with longer backoff
             if resp.status_code == 429:
                 retry_after = int(resp.headers.get("Retry-After", 30))
+                # Set global cooldown so other callers also wait
+                global _cooldown_until
+                _cooldown_until = time.time() + retry_after + 2
                 if attempt < MAX_RETRIES:
                     logger.warning("Open-Meteo 429 rate limited, waiting %ds "
                                    "(attempt %d/%d)", retry_after, attempt, MAX_RETRIES)

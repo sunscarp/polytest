@@ -177,36 +177,31 @@
 
   <div class="stats" id="statsRow"></div>
 
-  <div class="panels">
-    <div class="panel">
-      <h2>Real Positions (On-Chain)</h2>
-      <div id="positionsTable"></div>
-    </div>
-    <div class="panel">
-      <h2>Buy Recommendations</h2>
-      <div id="buyRecs" class="rec-log"></div>
-    </div>
+  <div class="panel" style="margin-bottom:16px;">
+    <h2>Open Positions</h2>
+    <div id="positionsTable"></div>
   </div>
 
   <div class="panels">
     <div class="panel">
+      <h2>Buy Recommendations</h2>
+      <div id="buyRecs" class="rec-log"></div>
+    </div>
+    <div class="panel">
       <h2>Sell Recommendations (Emailed)</h2>
       <div id="sellRecs" class="rec-log"></div>
     </div>
-    <div class="panel">
-      <h2>Monitoring Events</h2>
-      <div id="eventLog" class="rec-log"></div>
-    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom:16px;">
+    <h2>Monitoring Events</h2>
+    <div id="eventLog" class="rec-log"></div>
   </div>
 
   <div class="section-title" id="paperSection" style="display:none;">
     <span class="dot" style="background:var(--orange);"></span> Paper Trading
   </div>
   <div class="panels" id="paperPanels" style="display:none;">
-    <div class="panel">
-      <h2>Paper Open Positions</h2>
-      <div id="paperOpen"></div>
-    </div>
     <div class="panel">
       <h2>Paper Closed Trades</h2>
       <div id="paperClosed" class="rec-log"></div>
@@ -306,20 +301,26 @@ function renderStats(data) {
   $('statsRow').innerHTML = html;
 }
 
-function renderPositions(positions) {
-  if (!positions || !positions.length) {
-    $('positionsTable').innerHTML = '<div class="empty-state">No positions on-chain</div>';
+function renderPositions(realPositions, paperPositions) {
+  const hasReal = realPositions && realPositions.length;
+  const hasPaper = paperPositions && Object.keys(paperPositions).length > 0;
+
+  if (!hasReal && !hasPaper) {
+    $('positionsTable').innerHTML = '<div class="empty-state">No open positions</div>';
     return;
   }
+
   let html = '';
-  for (const p of positions) {
+
+  // Real positions
+  for (const p of (realPositions || [])) {
     const pnl = p.pnl || 0;
     const pnlPct = p.pnl_pct || 0;
     const costBasis = p.cost_basis || (p.size * p.avg_price);
     html += `<div class="pos-card">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
         <div>
-          <span class="badge ${p.outcome === 'No' ? 'badge-open' : 'badge-sell'}">${(p.outcome||'?').toUpperCase()}</span>
+          <span class="badge badge-open">${(p.outcome||'?').toUpperCase()}</span>
           <span style="font-weight:700;font-size:0.95rem;margin-left:8px;">${p.label}</span>
         </div>
         <span style="font-family:var(--mono);font-size:0.85rem;" class="${pnl >= 0 ? 'pnl-pos' : 'pnl-neg'}">${pnl >= 0 ? '+' : ''}$${Math.abs(pnl).toFixed(2)} (${pnlPct >= 0 ? '+' : ''}${pnlPct.toFixed(1)}%)</span>
@@ -333,24 +334,27 @@ function renderPositions(positions) {
       </div>
     </div>`;
   }
-  $('positionsTable').innerHTML = html;
-}
 
-function renderPaperOpen(positions) {
-  if (!positions || Object.keys(positions).length === 0) {
-    $('paperOpen').innerHTML = '<div class="empty-state">No open paper positions</div>';
-    return;
-  }
-  let html = '';
-  for (const [key, p] of Object.entries(positions)) {
+  // Paper positions
+  for (const [key, p] of Object.entries(paperPositions || {})) {
     const city = (p.city_slug || '').toUpperCase();
     const lastEvent = (p.monitoring_events || []).slice(-1)[0] || {};
-    const dist = lastEvent.distance_to_threshold != null ? lastEvent.distance_to_threshold.toFixed(1) : '--';
-    const metar = lastEvent.metar_temp != null ? lastEvent.metar_temp.toFixed(1) : '--';
-    const wcHigh = lastEvent.wc_high != null ? lastEvent.wc_high.toFixed(1) : '--';
     const opened = p.opened_at ? timeAgo(p.opened_at) : '--';
 
-    html += `<div class="pos-card">
+    // Forecasted highs
+    const wcHigh = lastEvent.wc_high != null ? lastEvent.wc_high.toFixed(1)
+      : (p.weather_com_high != null ? p.weather_com_high.toFixed(1) : '--');
+    const omHigh = p.open_meteo_high != null ? p.open_meteo_high.toFixed(1) : '--';
+
+    // Current temps
+    const wcCurrent = lastEvent.wc_current != null ? lastEvent.wc_current.toFixed(1) : '--';
+    const metar = lastEvent.metar_temp != null ? lastEvent.metar_temp.toFixed(1) : '--';
+
+    // Distance & status
+    const dist = lastEvent.distance_to_threshold != null ? lastEvent.distance_to_threshold.toFixed(1) : '--';
+    const lastAction = lastEvent.action || null;
+
+    html += `<div class="pos-card" style="border-left: 3px solid var(--orange);">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
         <div>
           <span class="badge badge-paper">PAPER</span>
@@ -358,18 +362,21 @@ function renderPaperOpen(positions) {
         </div>
         <span class="text-dim text-sm">opened ${opened}</span>
       </div>
-      <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:8px;font-size:0.78rem;font-family:var(--mono);">
+      <div style="display:grid;grid-template-columns:repeat(8,1fr);gap:8px;font-size:0.78rem;font-family:var(--mono);">
         <div><div class="text-dim text-sm">Bet</div><div>$${p.bet_size.toFixed(2)}</div></div>
-        <div><div class="text-dim text-sm">Entry NO</div><div>$${p.entry_no_price.toFixed(3)}</div></div>
-        <div><div class="text-dim text-sm">Shares</div><div>${p.shares.toFixed(2)}</div></div>
+        <div><div class="text-dim text-sm">NO Price</div><div>$${p.entry_no_price.toFixed(3)}</div></div>
         <div><div class="text-dim text-sm">WC High</div><div style="color:var(--cyan);">${wcHigh}</div></div>
+        <div><div class="text-dim text-sm">OM High</div><div style="color:var(--purple);">${omHigh}</div></div>
+        <div><div class="text-dim text-sm">WC Now</div><div>${wcCurrent}</div></div>
         <div><div class="text-dim text-sm">METAR</div><div>${metar}</div></div>
         <div><div class="text-dim text-sm">Dist</div><div>${dist}</div></div>
+        <div><div class="text-dim text-sm">Status</div><div>${lastAction ? actionBadge(lastAction) : '<span class="text-dim">new</span>'}</div></div>
       </div>
-      ${(p.monitoring_events || []).length > 0 ? `<div style="margin-top:8px;font-size:0.72rem;color:var(--text-dim);">Last action: ${actionBadge(lastEvent.action)} <span class="text-dim">${lastEvent.reason || ''}</span></div>` : ''}
+      ${(lastEvent.reason || lastEvent.closing_in) ? `<div style="margin-top:8px;font-size:0.72rem;color:var(--text-dim);">${lastAction ? actionBadge(lastAction) : ''} <span class="text-dim">${lastEvent.reason || ''}</span></div>` : ''}
     </div>`;
   }
-  $('paperOpen').innerHTML = html;
+
+  $('positionsTable').innerHTML = html;
 }
 
 function renderPaperClosed(positions) {
@@ -501,11 +508,10 @@ async function refresh() {
     }
 
     renderStats(data);
-    renderPositions(data.positions);
+    renderPositions(data.positions, paper.open_positions);
     renderBuyRecs(data.buy_recommendations);
     renderSellRecs(data.sell_recommendations);
     renderEvents(data.events);
-    renderPaperOpen(paper.open_positions);
     renderPaperClosed(paper.closed_positions);
 
     // Timers

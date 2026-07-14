@@ -16,6 +16,10 @@ logger = logging.getLogger(__name__)
 
 GAMMA_BASE = "https://gamma-api.polymarket.com"
 
+# ── Cache for get_event (avoids re-fetching same event multiple times per scan)
+_event_cache: dict[str, tuple[dict, float]] = {}  # slug -> (event, expires_at)
+_EVENT_CACHE_TTL = 300  # 5 minutes
+
 MONTHS = [
     "january", "february", "march", "april", "may", "june",
     "july", "august", "september", "october", "november", "december"
@@ -79,11 +83,19 @@ def _parse_temp_range(question: str) -> tuple[float, float]:
 def get_event(city_slug: str, date_str: str) -> Optional[dict]:
     """
     Fetch a Polymarket temperature event by city and date.
+    Cached for 5 minutes to avoid redundant API calls.
 
     Returns:
         Event dict with "markets" array, or None if not found.
     """
     slug = _slug_for_date(city_slug, date_str)
+
+    # Check cache first
+    cached = _event_cache.get(slug)
+    if cached and cached[1] > time.time():
+        logger.info("Polymarket cache hit: %s", slug)
+        return cached[0]
+
     url = f"{GAMMA_BASE}/events"
 
     for attempt in range(1, MAX_RETRIES + 1):
@@ -96,6 +108,7 @@ def get_event(city_slug: str, date_str: str) -> Optional[dict]:
                 event = data[0]
                 logger.info("Polymarket event found: %s (%d markets)",
                             slug, len(event.get("markets", [])))
+                _event_cache[slug] = (event, time.time() + _EVENT_CACHE_TTL)
                 return event
 
             logger.info("Polymarket: no event for %s", slug)
